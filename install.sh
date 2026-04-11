@@ -123,9 +123,12 @@ else
   mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/references"
   for FILE in \
     "SKILL.md" \
+    "install.sh" \
+    "uninstall.sh" \
     "scripts/utils.py" \
     "scripts/load_context.py" \
     "scripts/save_context.py" \
+    "scripts/summarize.py" \
     "scripts/recall_update.py" \
     "references/hook-api.md" \
     "references/context-structure.md"
@@ -144,15 +147,25 @@ echo ""
 info "Installing llama-cpp-python..."
 if python3 -c "import llama_cpp" 2>/dev/null; then
     ok "llama-cpp-python already installed"
+elif ! command -v pip3 &>/dev/null && ! python3 -m pip --version &>/dev/null; then
+    warn "pip3 not found — trying python3 -m pip..."
+    if python3 -m pip install llama-cpp-python 2>&1 | tee -a "$HOME/.claude/claude-recall-install.log"; then
+        ok "llama-cpp-python installed via python3 -m pip"
+    else
+        warn "llama-cpp-python install failed — LLM summaries disabled"
+    fi
 else
-    echo "  Installing llama-cpp-python (CPU build, this may take a few minutes)..."
+    echo "  Installing llama-cpp-python (this takes 2-5 minutes)..."
     INSTALL_LOG="$HOME/.claude/claude-recall-install.log"
     if pip3 install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
         ok "llama-cpp-python installed"
+    elif python3 -m pip install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
+        ok "llama-cpp-python installed via python3 -m pip"
     elif python3 -c "import llama_cpp" 2>/dev/null; then
         ok "llama-cpp-python installed"
     else
         warn "llama-cpp-python install failed — LLM summaries disabled"
+        warn "To install manually: pip3 install llama-cpp-python"
     fi
 fi
 

@@ -169,12 +169,22 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     return text[:cut] + "\n\n[claude-recall: truncated — edit context.md in Obsidian to trim]"
 
 
-def session_marker(session_id: str) -> Path:
-    """Marker file preventing context re-injection on every prompt."""
-    # Edge case: empty/unknown session_id — use timestamp+PID to avoid collisions
+def session_marker(session_id: str, cwd: Path | None = None) -> Path:
+    """
+    Marker file preventing context re-injection on every prompt.
+
+    Uses both session_id AND cwd (project directory) to ensure each project
+    directory gets its own marker. This means even if Claude Code reuses the
+    same session_id across terminal restarts, a new marker is created for
+    each project since cwd is different per-project.
+    """
+    # Always include session_id in the marker name
     if not session_id or session_id == "unknown":
-        session_id = f"{now_str()}_{os.getpid()}"
-    return Path.home() / ".claude" / f".recall_{session_id}"
+        session_id = f"unknown_{now_str()}_{os.getpid()}"
+
+    # Include a short slug of the cwd to distinguish projects
+    slug = cwd_to_slug(cwd) if cwd else "unknown"
+    return Path.home() / ".claude" / f".recall_{slug}_{session_id}"
 
 
 def cleanup_stale_markers():

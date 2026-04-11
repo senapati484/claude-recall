@@ -77,7 +77,7 @@ def generate_summary(messages: list[dict]) -> dict | None:
         model_path = str(get_model_path())
         llm = Llama(
             model_path=model_path,
-            n_ctx=2048,
+            n_ctx=8192,
             n_threads=4,
             n_gpu_layers=0,   # CPU only — no GPU assumption
             verbose=False,
@@ -92,8 +92,7 @@ def generate_summary(messages: list[dict]) -> dict | None:
                 {"role": "user",   "content": user_msg},
             ],
             max_tokens=512,
-            temperature=0.1,   # low temp = more consistent JSON
-            stop=["```"],
+            temperature=0.1,   # low temp = more consistent JSON,
         )
 
         raw = response["choices"][0]["message"]["content"].strip()

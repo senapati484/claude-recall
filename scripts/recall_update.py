@@ -121,7 +121,7 @@ def generate_llm_context(cwd: Path) -> dict | None:
 
         llm = Llama(
             model_path=str(get_model_path()),
-            n_ctx=2048,
+            n_ctx=8192,
             n_threads=4,
             n_gpu_layers=0,
             verbose=False,
@@ -134,7 +134,6 @@ def generate_llm_context(cwd: Path) -> dict | None:
             ],
             max_tokens=512,
             temperature=0.1,
-            stop=["```"],
         )
 
         raw = response["choices"][0]["message"]["content"].strip()

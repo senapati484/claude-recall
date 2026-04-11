@@ -26,6 +26,9 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+# CRITICAL: must set path BEFORE importing summarize
+sys.path.insert(0, str(Path(__file__).parent))
+
 try:
     from summarize import generate_summary as _llm_summary
     _HAS_LLM = True
@@ -42,7 +45,6 @@ def debug_log(msg: str) -> None:
     except Exception:
         pass
 
-sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
     load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
     cwd_to_slug, now_str, session_marker, cleanup_stale_markers,
@@ -903,7 +905,7 @@ def save_session() -> None:
     update_index(vault_root, slug, cwd, facts["turns"])
 
     # Clean up session marker
-    marker = session_marker(session_id)
+    marker = session_marker(session_id, cwd)
     if marker.exists():
         marker.unlink(missing_ok=True)
 

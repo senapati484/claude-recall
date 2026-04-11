@@ -93,7 +93,6 @@ def summarise_file(llm, filepath: Path, root: Path) -> dict | None:
             messages=[{"role": "user", "content": prompt}],
             max_tokens=256,
             temperature=0.1,
-            stop=["```"],
         )
         raw = response["choices"][0]["message"]["content"].strip()
         if raw.startswith("```"):
@@ -143,7 +142,7 @@ def scan_project() -> None:
     from llama_cpp import Llama
     llm = Llama(
         model_path=str(get_model_path()),
-        n_ctx=2048,
+        n_ctx=8192,
         n_threads=4,
         n_gpu_layers=0,
         verbose=False,
