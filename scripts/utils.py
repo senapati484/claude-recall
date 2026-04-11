@@ -796,3 +796,26 @@ def build_index_table(entries: list[dict]) -> str:
         )
     
     return header + "\n".join(rows) + "\n"
+
+
+def get_model_path() -> Path:
+    """
+    Return the path to the local Qwen GGUF model file.
+    Model lives at ~/.claude/models/ — shared across all projects.
+    Does NOT raise if the file is absent; callers check .exists() themselves.
+    """
+    return Path.home() / ".claude" / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
+
+
+def llm_available() -> bool:
+    """
+    True if both llama-cpp-python is importable AND the model file exists.
+    Used by summarize.py and scan_project.py as a guard before loading.
+    """
+    if not get_model_path().exists():
+        return False
+    try:
+        import llama_cpp  # noqa: F401
+        return True
+    except ImportError:
+        return False

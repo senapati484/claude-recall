@@ -139,9 +139,68 @@ fi
 
 chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
 
+# ── 5a. Install llama-cpp-python ─────────────────────────────────────────────
+echo ""
+info "Installing llama-cpp-python..."
+try:
+    if python3 -c "import llama_cpp" 2>/dev/null; then
+        ok "llama-cpp-python already installed"
+    else
+        echo "  Installing llama-cpp-python (CPU build)..."
+        pip3 install llama-cpp-python --quiet 2>/dev/null || pip3 install llama-cpp-python --quiet
+        if python3 -c "import llama_cpp" 2>/dev/null; then
+            ok "llama-cpp-python installed"
+        else
+            warn "llama-cpp-python install failed — LLM summaries disabled"
+        fi
+    fi
+except Exception as e:
+    warn "llama-cpp-python error: $e — LLM summaries disabled"
+
+# ── 5b. Download Qwen2.5 0.5B GGUF model ─────────────────────────────────────
+MODEL_DIR="$HOME/.claude/models"
+MODEL_FILE="$MODEL_DIR/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+
+echo ""
+info "Checking local model..."
+mkdir -p "$MODEL_DIR"
+
+if [ -f "$MODEL_FILE" ]; then
+    ok "Model already present: $MODEL_FILE"
+elif [ -s "$MODEL_FILE" ]; then
+    ok "Model file exists: $MODEL_FILE"
+else
+    echo "  Downloading Qwen2.5 0.5B (~380 MB)..."
+    try:
+        if command -v curl &>/dev/null; then
+            curl -L --progress-bar "$MODEL_URL" -o "$MODEL_FILE" 2>/dev/null || {
+                warn "Download failed"
+                rm -f "$MODEL_FILE"
+            }
+        elif command -v wget &>/dev/null; then
+            wget -q "$MODEL_URL" -O "$MODEL_FILE" 2>/dev/null || {
+                warn "Download failed"
+                rm -f "$MODEL_FILE"
+            }
+        else
+            warn "No curl/wget — download manually:"
+            warn "  $MODEL_URL"
+        fi
+        [ -f "$MODEL_FILE" ] && ok "Model saved → $MODEL_FILE"
+    except Exception as e:
+        warn "Model download error: $e"
+
+    # Verify download
+    if [ ! -f "$MODEL_FILE" ]; then
+        warn "Model not found — LLM features disabled"
+    fi
+fi
+
 # ── 5. Register hooks ─────────────────────────────────────────────────────────
 echo ""
 info "Registering hooks in $SETTINGS..."
+SCAN_CMD="python3 $INSTALL_DIR/scripts/scan_project.py"
 
 LOAD_CMD="python3 $INSTALL_DIR/scripts/load_context.py"
 SAVE_CMD="python3 $INSTALL_DIR/scripts/save_context.py"
@@ -218,6 +277,7 @@ echo "  └───────────────────────
 echo ""
 echo "  Vault:    $VAULT_PATH"
 echo "  Notes at: $VAULT_CR/projects/<project>/"
+echo "  Model:    $MODEL_FILE"
 echo ""
 echo "  NEXT STEP: Restart Claude Code."
 echo ""

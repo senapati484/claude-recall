@@ -16,6 +16,7 @@ Storage layout in Obsidian:
 Never exits non-zero — a failed hook would block Claude from starting.
 """
 
+import json
 import sys
 import traceback
 import os
@@ -67,10 +68,7 @@ def load_context() -> None:
         
         debug_log(f"slug={slug}, project_dir={project_dir}, context exists={context_md.exists()}")
 
-        # ──────────────────────────────────────────────────────────────────
         # AUTO-GENERATE context.md if it doesn't exist or is empty scaffold
-        # This is the KEY feature — Claude has full context from first msg
-        # ──────────────────────────────────────────────────────────────────
         needs_generation = False
         if not context_md.exists():
             needs_generation = True
@@ -93,14 +91,7 @@ def load_context() -> None:
                 debug_log(f"Auto-generate failed: {exc}")
                 print(f"[claude-recall] Auto-generate error: {exc}", file=sys.stderr)
 
-        # ──────────────────────────────────────────────────────
         # Build context output for Claude
-        # Token budget: 2000 total
-        # - context.md: 800 tokens
-        # - each session: 400 tokens (2 sessions = 800 tokens)
-        # - header/footer: ~200 tokens
-        # - gaps/separators: ~200 tokens
-        # ──────────────────────────────────────────────────────
         parts: list[str] = []
         max_ctx = cfg.get("max_context_tokens", 2000)
 
@@ -115,7 +106,6 @@ def load_context() -> None:
         sessions_dir = project_dir / "sessions"
         n = cfg.get("include_recent_sessions", 2)
         session_count = 0
-        session_summaries = []  # For header: tool counts and changes summary
         if sessions_dir.exists() and n > 0:
             try:
                 all_sessions = sorted(sessions_dir.glob("*.md"), reverse=True)
@@ -123,11 +113,31 @@ def load_context() -> None:
                 for note in all_sessions[:n]:
                     t = note.read_text(encoding="utf-8").strip()
                     if t:
-                        # Truncate individual session notes
                         t = truncate_to_tokens(t, int(max_ctx * 0.2))
                         parts.append(f"## Previous session — {note.stem}\n\n{t}")
             except Exception as exc:
                 debug_log(f"Session read error: {exc}")
+
+        # file-index.json — per-file summaries (written by scan_project.py)
+        file_index_path = project_dir / "file-index.json"
+        if file_index_path.exists():
+            try:
+                raw_index = json.loads(
+                    file_index_path.read_text(encoding="utf-8")
+                )
+                raw_index.pop("_cache_mtimes", None)
+
+                if raw_index:
+                    lines = []
+                    for rel_path, info in list(raw_index.items())[:15]:
+                        if isinstance(info, dict) and info.get("purpose"):
+                            lines.append(f"- `{rel_path}` — {info['purpose']}")
+                    if lines:
+                        parts.append(
+                            "## Key files in this project\n\n" + "\n".join(lines)
+                        )
+            except Exception as exc:
+                print(f"[claude-recall] file-index read error: {exc}", file=sys.stderr)
 
         if not parts:
             debug_log("No context found even after auto-generation")

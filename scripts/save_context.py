@@ -26,6 +26,12 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+try:
+    from summarize import generate_summary as _llm_summary
+    _HAS_LLM = True
+except ImportError:
+    _HAS_LLM = False
+
 DEBUG_LOG = Path.home() / ".claude" / "claude-recall-debug.log"
 
 def debug_log(msg: str) -> None:
@@ -535,76 +541,72 @@ def extract_session_summary(transcript: dict, git_changes: dict) -> str:
 
 # ── Note builders ─────────────────────────────────────────────────────────────
 
-def build_session_note(slug: str, cwd: Path, session_id: str, facts: dict,
-                       summary: str = "", transcript: dict = None,
-                       git_changes: dict = None) -> str:
+def build_session_note(slug: str, cwd: Path, session_id: str,
+                       facts: dict, llm_data: dict | None = None) -> str:
     ts = datetime.now()
-    transcript = transcript or {}
-    git_changes = git_changes or {}
 
-    # Files section - combine from multiple sources
-    all_files = list(facts.get("files", []))
-    for op, path in transcript.get("file_ops", []):
-        if op in ("write", "edit") and path and path not in all_files:
-            all_files.append(path)
+    # --- Files section ---
+    if llm_data and llm_data.get("files_and_roles"):
+        files_items = "\n".join(
+            f"- `{f}` — {role}"
+            for f, role in llm_data["files_and_roles"].items()
+        )
+        files_section = f"\n## Files touched\n\n{files_items}\n"
+    elif facts.get("files"):
+        files_section = "\n## Files touched\n\n" + "\n".join(
+            f"- `{f}`" for f in facts["files"]
+        ) + "\n"
+    else:
+        files_section = ""
 
-    files_section = ""
-    if all_files:
-        items = "\n".join(f"- `{f}`" for f in all_files[:20])
-        files_section = f"\n## Files touched\n\n{items}\n"
+    # --- Summary line ---
+    if llm_data and llm_data.get("summary"):
+        summary_section = f"\n## Summary\n\n{llm_data['summary']}\n"
+    else:
+        summary_section = (
+            f"\n## Summary\n\n"
+            f"Started with: {facts.get('first_prompt','?')} · "
+            f"{len(facts.get('files',[]))} file(s) modified\n"
+        )
 
-    # Tools section
-    tools_section = ""
-    if transcript.get("tool_calls"):
-        tool_counts = {}
-        for t in transcript["tool_calls"]:
-            name = t.get("tool", "unknown")
-            tool_counts[name] = tool_counts.get(name, 0) + 1
-        tools_list = [f"- `{name}`: {count}x" for name, count in sorted(tool_counts.items())]
-        tools_section = f"\n## Tools used\n\n" + "\n".join(tools_list[:10]) + "\n"
+    # --- Decisions ---
+    decisions_section = ""
+    if llm_data and llm_data.get("decisions"):
+        items = "\n".join(f"- {d}" for d in llm_data["decisions"])
+        decisions_section = f"\n## Key decisions\n\n{items}\n"
 
-    # Errors section
-    errors_section = ""
-    if facts.get("errors"):
-        errors_list = "\n".join(f"- `{e}`" for e in facts["errors"][:5])
-        errors_section = f"\n## Errors encountered\n\n{errors_list}\n"
+    # --- Next steps ---
+    if llm_data and llm_data.get("next_steps"):
+        steps = "\n".join(f"- [ ] {s}" for s in llm_data["next_steps"])
+        next_section = f"\n## Next steps\n\n{steps}\n"
+    else:
+        next_section = "\n## Next steps\n\n- [ ] _(edit in Obsidian or ask Claude to summarise)_\n"
 
-    # Git changes section
-    git_section = ""
-    if git_changes.get("diff_summary"):
-        git_section = f"\n## Git changes\n\n```\n{git_changes['diff_summary']}\n```\n"
-    if git_changes.get("new_files"):
-        new_files_list = "\n".join(f"- `{f}`" for f in git_changes["new_files"][:10])
-        git_section += f"\n### New files\n\n{new_files_list}\n"
+    # --- Keywords ---
+    keywords_section = ""
+    if llm_data and llm_data.get("keywords"):
+        kw = ", ".join(f"`{k}`" for k in llm_data["keywords"])
+        keywords_section = f"\n**Keywords:** {kw}\n"
 
-    summary_section = ""
-    if summary:
-        summary_section = f"\n## Summary\n\n{summary}\n"
-
-    return (
+    frontmatter = (
         f"---\n"
         f"date: {ts.strftime('%Y-%m-%d')}\n"
         f"time: {ts.strftime('%H:%M')}\n"
         f"project: {slug}\n"
         f"directory: {cwd}\n"
         f"session_id: {session_id}\n"
-        f"turns: {facts['turns']}\n"
+        f"turns: {facts.get('turns', 0)}\n"
+        f"llm_summary: {'true' if llm_data else 'false'}\n"
         f"tags: [claude-recall, session]\n"
         f"---\n\n"
         f"# Session {ts.strftime('%Y-%m-%d %H:%M')}\n\n"
         f"## Directory\n\n`{cwd}`\n\n"
-        f"## Started with\n\n> {facts['first_prompt']}\n\n"
-        f"## Stats\n\n"
-        f"{facts['turns']} user turns · {facts['total_messages']} total messages"
-        f" · {facts.get('tool_count', 0)} tool calls\n"
-        f"{summary_section}"
-        f"{files_section}"
-        f"{tools_section}"
-        f"{errors_section}"
-        f"{git_section}"
-        f"## Next steps\n\n"
-        f"- [ ] _(edit in Obsidian or ask Claude to summarise)_\n"
+        f"## Started with\n\n> {facts.get('first_prompt','?')}\n\n"
+        f"## Stats\n\n{facts.get('turns',0)} user turns · "
+        f"{facts.get('total_messages',0)} total messages\n"
     )
+
+    return frontmatter + summary_section + decisions_section + files_section + next_section + keywords_section
 
 
 CONTEXT_TEMPLATE = """\
@@ -858,27 +860,12 @@ def save_session() -> None:
         )
         return
 
-    # Extract facts and context from transcript
-    facts = extract_facts(transcript)
-    transcript_context = extract_context_from_transcript(transcript, cwd)
-
-    # Get git changes
-    git_changes = extract_git_changes(cwd)
-
-    summary = extract_session_summary(transcript, git_changes)
-
-    # Detect project stack from filesystem
-    fs_stack = detect_project_stack(cwd)
-
-    # Auto-generate/update context.md (replaces old empty scaffold)
-    try:
-        update_context_md(project_dir, slug, cwd, transcript_context, fs_stack, git_changes)
-    except Exception as e:
-        debug_log(f"Error updating context.md: {e}")
-        # Non-fatal — continue with session note
-
     # Write session note
-    note      = build_session_note(slug, cwd, session_id, facts, summary, transcript, git_changes)
+    facts    = extract_facts(transcript)
+    llm_data = None
+    if _HAS_LLM:
+        llm_data = _llm_summary(messages)
+    note = build_session_note(slug, cwd, session_id, facts, llm_data)
     note_path = project_dir / "sessions" / f"{now_str()}.md"
 
     debug_log(f"Writing note to: {note_path}")
