@@ -1,36 +1,42 @@
 <p align="center">
-  <img src="data/claude.svg" width="80" alt="Claude">&nbsp;&nbsp;&nbsp;
-  <b style="font-size: 28px;">×</b>&nbsp;&nbsp;&nbsp;
-  <img src="data/obsidian.png" width="80" alt="Obsidian">
+  <a href="https://github.com/senapati484/claude-recall">
+    <img src="data/obsidian.png" width="70" alt="Obsidian">
+    &nbsp;&nbsp;⟷&nbsp;&nbsp;
+    <img src="data/claude.svg" width="70" alt="Claude">
+  </a>
 </p>
 
 <h1 align="center">claude-recall</h1>
 
 <p align="center">
-  <em>Persistent Obsidian memory for Claude Code</em><br>
-  <em>Install once. Works on every session. Zero config.</em>
+  <strong>Persistent Obsidian memory for Claude Code</strong><br>
+  <sub>Install once · Works every session · Zero config · Zero project pollution</sub>
 </p>
 
 <p align="center">
-  <a href="#install"><img src="https://img.shields.io/badge/install-one_command-D97757?style=for-the-badge&logo=gnubash&logoColor=white" alt="Install"></a>
-  <a href="#how-it-works"><img src="https://img.shields.io/badge/hooks-automatic-7C3AED?style=for-the-badge&logo=obsidian&logoColor=white" alt="Automatic Hooks"></a>
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT License"></a>
+  <a href="#-install"><img src="https://img.shields.io/badge/install-one_command-D97757?style=for-the-badge&logo=gnubash&logoColor=white" alt="Install"></a>&nbsp;
+  <a href="#-how-it-works"><img src="https://img.shields.io/badge/hooks-automatic-7C3AED?style=for-the-badge&logo=obsidian&logoColor=white" alt="Automatic"></a>&nbsp;
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge" alt="License"></a>
 </p>
 
----
+<br>
 
-## The Problem
+## 💡 The Problem
 
-Claude Code has no memory between sessions. Every time you start a new conversation, Claude forgets your project's stack, architecture decisions, gotchas, and what you worked on yesterday. You end up repeating the same context over and over.
+Claude Code has **no memory between sessions**. Every time you start a new conversation, Claude forgets your project's stack, architecture decisions, gotchas, and what you worked on yesterday.
 
-## The Solution
+You end up repeating the same context over and over.
 
-**claude-recall** hooks into Claude Code and bridges it with your Obsidian vault — automatically.
+## ✅ The Solution
 
-- 🔵 **Before your first message** → loads your project context from Obsidian
-- 🟠 **When you exit** → saves a structured session note back to the vault
+**claude-recall** hooks into Claude Code and bridges it with your **Obsidian vault** — completely automatically.
 
-No manual invocation. No config beyond your vault path. No files created in your project directory.
+| | Hook | What happens |
+|:--|:--|:--|
+| 🔵 | **Before your first message** | Loads your project context from Obsidian |
+| 🟠 | **When you exit** | Saves a structured session note back to the vault |
+
+No manual invocation. No config beyond your vault path. **No files created in your project directory.**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/install.sh | bash
@@ -38,45 +44,35 @@ curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/inst
 
 ---
 
-## How it works
+## 🔁 How it works
 
-<table>
-<tr>
-<td width="50%">
-
-### 🔵 On Session Start
-
-The `UserPromptSubmit` hook fires before your first message:
+### 🔵 On Session Start — `UserPromptSubmit` hook
 
 1. Reads `context.md` from your vault
 2. Loads the last 2 session notes
 3. Injects everything into Claude's system context
 
-Claude starts every session **already knowing** your project.
+> Claude starts every session **already knowing** your project.
 
-</td>
-<td width="50%">
-
-### 🟠 On Session End
-
-The `Stop` hook fires when you exit:
+### 🟠 On Session End — `Stop` hook
 
 1. Reads the session transcript
 2. Extracts files mentioned, first prompt, stats
 3. Writes a dated Markdown note to the vault
 
-Your work is **automatically documented** in Obsidian.
+> Your work is **automatically documented** in Obsidian.
 
-</td>
-</tr>
-</table>
+**Project slug** is derived from your working directory:
 
-**Project slug** is derived from your working directory —
-`~/projects/setu` → `setu` · `~/client/acme/dashboard` → `acme-dashboard`
+| Path | Slug |
+|:--|:--|
+| `~/projects/setu` | `setu` |
+| `~/client/acme/dashboard` | `acme-dashboard` |
+| `~/Desktop/Dev/Innovation/setu` | `innovation-setu` |
 
 ---
 
-## What gets created in Obsidian
+## 📁 What gets created in Obsidian
 
 ```
 your-vault/
@@ -92,7 +88,7 @@ your-vault/
 
 ### `context.md` — your permanent memory
 
-Open it in Obsidian and fill in your stack, architecture decisions, gotchas, current state — anything Claude should always know. It ships with a ready-to-fill template:
+Open it in Obsidian and fill in your stack, architecture decisions, gotchas — anything Claude should always know:
 
 ```markdown
 ## What this is
@@ -112,45 +108,48 @@ Flutter · Express.js · MongoDB Atlas · Railway
 
 ### Session notes — automatic breadcrumbs
 
-Each session note includes metadata as YAML frontmatter, making them searchable in Obsidian with Dataview:
+Each session note includes YAML frontmatter, making them searchable with Obsidian Dataview:
 
-```markdown
+```yaml
 ---
 date: 2026-04-11
 project: setu
 turns: 8
 tags: [claude-recall, session]
 ---
+```
 
+```markdown
 # Session 2026-04-11 14:30
 
 ## Started with
 > Add JWT auth to the Express routes
 
 ## Files mentioned
-- `server/auth.js`
-- `routes/api.js`
-- `lib/screens/home_screen.dart`
+- server/auth.js
+- routes/api.js
+- lib/screens/home_screen.dart
 ```
 
 ---
 
-## Install
+## 📦 Install
 
-**Requirements:** Python 3.8+ · Claude Code · Obsidian (with a vault created)
+> **Requirements:** Python 3.8+ · Claude Code · Obsidian (with a vault created)
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/install.sh | bash
 ```
 
-The installer:
+**What the installer does:**
+
 1. Asks for your Obsidian vault path (once)
 2. Saves config to `~/.claude/claude-recall.json`
 3. Clones this repo to `~/.claude/skills/claude-recall/`
 4. Registers both hooks in `~/.claude/settings.json`
 5. Creates the vault folder skeleton
 
-**Restart Claude Code after install.**
+**⚠️ Restart Claude Code after install.**
 
 <details>
 <summary><strong>Manual install (no curl)</strong></summary>
@@ -164,9 +163,9 @@ bash ~/.claude/skills/claude-recall/install.sh
 
 ---
 
-## Config
+## ⚙️ Config
 
-`~/.claude/claude-recall.json` — written by the installer, edit to override:
+Edit `~/.claude/claude-recall.json` to override defaults:
 
 ```json
 {
@@ -180,7 +179,7 @@ bash ~/.claude/skills/claude-recall/install.sh
 ```
 
 | Key | Default | What it does |
-|:---|:---|:---|
+|:--|:--|:--|
 | `vault_path` | _(required)_ | Absolute path to your Obsidian vault |
 | `vault_folder` | `claude-recall` | Folder inside the vault for all notes |
 | `max_context_tokens` | `2000` | Token budget for injected context (~8K chars) |
@@ -190,21 +189,21 @@ bash ~/.claude/skills/claude-recall/install.sh
 
 ---
 
-## Update
+## 🔄 Update
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/install.sh | bash
 ```
 
-Re-running the installer detects an existing install and runs `git pull` instead of a fresh clone.
+Re-running the installer detects an existing install and runs `git pull`.
 
 ---
 
-## Uninstall
+## 🗑️ Uninstall
 
 ```bash
 # 1. Remove hooks from settings
-# Edit ~/.claude/settings.json and remove the two "claude-recall" entries
+#    Edit ~/.claude/settings.json — delete the two "claude-recall" entries
 
 # 2. Remove skill files
 rm -rf ~/.claude/skills/claude-recall
@@ -217,39 +216,37 @@ rm ~/.claude/claude-recall.json
 
 ---
 
-## Architecture
+## 🏗️ Architecture
 
 ```
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│   Claude Code    │     │  claude-recall    │     │  Obsidian Vault  │
-│                  │     │                   │     │                  │
-│  UserPromptSubmit├────►│  load_context.py  ├────►│  context.md      │
-│                  │     │                   │◄────┤  sessions/*.md   │
-│  Stop            ├────►│  save_context.py  ├────►│                  │
-│                  │     │                   │     │                  │
-└──────────────────┘     └──────────────────┘     └──────────────────┘
-                              │
-                              ▼
-                    ~/.claude/claude-recall.json
+┌──────────────┐       ┌─────────────────┐       ┌────────────────┐
+│  Claude Code │       │  claude-recall   │       │ Obsidian Vault │
+│              │       │                  │       │                │
+│  Prompt ─────┼──────►│ load_context.py  │◄──────┤ context.md     │
+│              │       │                  │       │ sessions/*.md  │
+│  Exit ───────┼──────►│ save_context.py  ├──────►│                │
+└──────────────┘       └────────┬─────────┘       └────────────────┘
+                                │
+                     ~/.claude/claude-recall.json
 ```
 
 ---
 
-## File reference
+## 📄 File reference
 
 | File | Purpose |
-|:---|:---|
+|:--|:--|
 | `install.sh` | One-command GitHub installer |
 | `SKILL.md` | Claude skill metadata and instructions |
-| `scripts/load_context.py` | `UserPromptSubmit` hook — loads context from Obsidian |
-| `scripts/save_context.py` | `Stop` hook — saves session note to Obsidian |
+| `scripts/load_context.py` | `UserPromptSubmit` hook — injects Obsidian context |
+| `scripts/save_context.py` | `Stop` hook — writes session note to Obsidian |
 | `scripts/utils.py` | Shared helpers (config, slugs, truncation) |
 | `references/hook-api.md` | Claude Code hook I/O specification |
 | `references/context-structure.md` | Vault note formats and examples |
 
 ---
 
-## Troubleshooting
+## 🔧 Troubleshooting
 
 <details>
 <summary><strong>Claude isn't loading my context</strong></summary>
@@ -262,28 +259,28 @@ echo '{"cwd":"'$(pwd)'","session_id":"test"}' | python3 ~/.claude/skills/claude-
 
 If output is empty, check:
 - Does `context.md` exist in your vault for this project?
-- Is your vault path correct in `~/.claude/claude-recall.json`?
+- Is `vault_path` correct in `~/.claude/claude-recall.json`?
 
 </details>
 
 <details>
 <summary><strong>Session notes aren't being saved</strong></summary>
 
-Check `save_sessions` is `true` in `~/.claude/claude-recall.json` and that Claude Code is passing a transcript path to the Stop hook.
+Check that `save_sessions` is `true` in `~/.claude/claude-recall.json` and that Claude Code is passing a `transcript_path` to the Stop hook.
 
 </details>
 
 <details>
 <summary><strong>Wrong project slug</strong></summary>
 
-The slug is derived by stripping noise segments (`projects`, `repos`, `code`, `src`, `workspace`, `dev`, `work`, `home`) from your directory path and keeping the last 2 meaningful segments. Check with:
+The slug strips noise segments (`projects`, `repos`, `code`, `src`, `workspace`, `dev`, `work`, `home`) and keeps the last 2 meaningful parts. Verify with:
 
 ```bash
 python3 -c "
 from pathlib import Path
-import sys; sys.path.insert(0, '$HOME/.claude/skills/claude-recall/scripts')
+import sys; sys.path.insert(0, '\$HOME/.claude/skills/claude-recall/scripts')
 from utils import cwd_to_slug
-print(cwd_to_slug(Path('$(pwd)')))
+print(cwd_to_slug(Path('\$(pwd)')))
 "
 ```
 
