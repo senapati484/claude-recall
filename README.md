@@ -1,7 +1,9 @@
 <p align="center">
-  <a href="https://github.com/senapati484/claude-recall"><img src="data/obsidian.png" width="70" alt="Obsidian" align="absmiddle"></a>
-  <img src="data/plus.svg" width="24" alt="+" align="absmiddle">
   <a href="https://github.com/senapati484/claude-recall"><img src="data/claude.svg" width="70" alt="Claude" align="absmiddle"></a>
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="data/plus.svg" width="32" alt="+" align="absmiddle">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <a href="https://github.com/senapati484/claude-recall"><img src="data/obsidian.png" width="70" alt="Obsidian" align="absmiddle"></a>
 </p>
 
 <h1 align="center">claude-recall</h1>
