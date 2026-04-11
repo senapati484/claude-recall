@@ -5,10 +5,10 @@
 ```
 <your-vault>/
 └── claude-recall/
-    ├── _index.md                         ← auto-updated on every session end
+    ├── _index.md                         ← deduplicated project table (auto-updated)
     └── projects/
         └── setu/                         ← slug derived from project directory
-            ├── context.md                ← YOU edit this in Obsidian
+            ├── context.md                ← auto-populated, user can add notes
             └── sessions/
                 ├── 2025-01-15_09-42.md
                 └── 2025-01-16_14-07.md
@@ -18,7 +18,12 @@
 
 ## context.md — permanent project memory
 
-**Scaffold written on first session:**
+**First-session creation (auto-populated):**
+
+context.md is automatically populated when Claude finishes a session. It detects
+the project stack from filesystem (package.json, pubspec.yaml, etc.) and extracts
+architecture decisions, gotchas, and current state from the transcript.
+
 ```markdown
 ---
 project: setu
@@ -30,55 +35,58 @@ tags: [claude-recall, context]
 # setu
 
 ## What this is
+<!-- auto:what_this_is:start -->
+This appears to be a civic health platform with verified donor registration
+<!-- auto:what_this_is:end -->
 
 ## Stack
+<!-- auto:stack:start -->
+Flutter · Express.js · MongoDB Atlas · Cloudflare R2 · Firebase
+<!-- auto:stack:end -->
 
 ## Current state
+<!-- auto:current_state:start -->
+Last session worked on: Implement the ambulance dispatch endpoint
+<!-- auto:current_state:end -->
 
 ## Architecture decisions
+<!-- auto:architecture:start -->
+- Using single Flutter repo with role-based routing
+- Cloudflare R2 over Cloudinary for S3-compatible storage
+<!-- auto:architecture:end -->
 
 ## Gotchas
+<!-- auto:gotchas:start -->
+- express.raw() MUST precede express.json() for webhook signatures
+- MongoDB geospatial: use 2dsphere index, not 2d
+<!-- auto:gotchas:end -->
 
 ## Environment
+<!-- auto:environment:start -->
+Env vars: MONGODB_URI, R2_ACCESS_KEY, FCM_PROJECT_ID
+Git branch: main
+<!-- auto:environment:end -->
 ```
 
-**Example after filling in:**
+### Auto-marker system
+
+Content between `<!-- auto:section:start -->` and `<!-- auto:section:end -->` is managed
+by claude-recall. It is updated on every session end and on `/recall update`.
+
+Content OUTSIDE these markers is user-owned and never modified. Users can add their
+own notes, sections, or inline comments anywhere outside the markers.
+
+**Example — user adding their own notes:**
 ```markdown
----
-project: setu
-directory: /home/sayan/projects/setu
-created: 2025-01-15
-tags: [claude-recall, context]
----
-
-# setu
-
-## What this is
-Civic health platform — verified donor registration, blood inventory search,
-one-tap ambulance dispatch with live GPS tracking.
-
 ## Stack
-Flutter (single codebase, role-based routing) · Express.js on Railway ·
-MongoDB Atlas · Cloudflare R2 · Firebase Cloud Messaging ·
-Nodemailer OTP · Gemini Flash 2.0
+<!-- auto:stack:start -->
+Flutter · Express.js · MongoDB Atlas
+<!-- auto:stack:end -->
 
-## Current state
-Auth (email OTP) done. Blood inventory search done.
-Working on: ambulance dispatch real-time tracking via Socket.io.
+My notes: We're considering migrating to Supabase in Q2.
 
-## Architecture decisions
-- Single Flutter repo with role-based routing — no separate admin repo
-- Cloudflare R2 over Cloudinary for S3-compatible storage
-- express.raw() MUST precede express.json() for webhook signature verification
-
-## Gotchas
-- FCM: google-services.json goes in android/app/ — never commit it
-- MongoDB geospatial: use 2dsphere index, not 2d
-- Railway free tier sleeps after 30 min — upgrade before demo
-
-## Environment
-Railway project: setu-backend · MongoDB cluster: cluster0
-R2 bucket: setu-uploads · FCM project: setu-fcm
+## Custom Section (user-written, never auto-modified)
+This entire section is mine. Claude will never touch it.
 ```
 
 ---
@@ -112,6 +120,10 @@ tags: [claude-recall, session]
 
 6 user turns · 12 total messages
 
+## Summary
+
+Started with: Implement the ambulance dispatch endpoint · I've created the dispatch endpoint with Socket.io integration for real-time GPS tracking
+
 ## Files mentioned
 
 - `server/routes/dispatch.js`
@@ -127,13 +139,31 @@ tags: [claude-recall, session]
 
 ---
 
-## _index.md — project index
+## _index.md — project index (deduplicated)
 
-Auto-appended on every session end:
+Each project appears **exactly once**, with accumulated stats across all sessions:
+
 ```markdown
-- [setu](projects/setu/context) · `/home/sayan/projects/setu` · 6 turns · 2025-01-16 14:07
-- [voiceforge](projects/voiceforge/context) · `/home/sayan/projects/voiceforge` · 4 turns · 2025-01-15 11:22
+---
+tags: [claude-recall]
+---
+
+# claude-recall — project index
+
+Auto-updated by claude-recall on each session end.
+
+## Projects
+
+| Project | Directory | Sessions | Total Turns | Last Active |
+|---------|-----------|----------|-------------|-------------|
+| [setu](projects/setu/context) | `/home/sayan/projects/setu` | 5 | 127 | 2025-01-16 14:07 |
+| [voiceforge](projects/voiceforge/context) | `/home/sayan/projects/voiceforge` | 2 | 8 | 2025-01-15 11:22 |
 ```
+
+When a session ends for an existing project, its row is **updated in-place**
+(session count incremented, turns accumulated, timestamp refreshed).
+
+When a new project is first seen, a new row is appended.
 
 ---
 

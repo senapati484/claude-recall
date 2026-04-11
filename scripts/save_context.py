@@ -7,9 +7,12 @@ extracts key facts, and writes a structured Markdown note to Obsidian:
 
   <vault>/claude-recall/projects/<slug>/sessions/YYYY-MM-DD_HH-MM.md
 
-On first session for a project it also scaffolds:
-  <vault>/claude-recall/projects/<slug>/context.md  ← user edits this in Obsidian
-  <vault>/claude-recall/_index.md                   ← running log of all projects
+On first session for a project it also generates:
+  <vault>/claude-recall/projects/<slug>/context.md  ← auto-populated, user can edit
+  <vault>/claude-recall/_index.md                   ← deduplicated project index
+
+On subsequent sessions it MERGES new learnings into existing context.md,
+preserving any user-written content outside auto-markers.
 
 Never exits non-zero.
 """
@@ -36,6 +39,8 @@ sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
     load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
     cwd_to_slug, now_str, session_marker, cleanup_stale_markers,
+    filter_file_paths, detect_project_stack, is_scaffold_only,
+    parse_index_entries, merge_auto_section, build_index_table,
 )
 
 
@@ -75,6 +80,7 @@ def parse_transcript(path: str) -> list[dict]:
 
 
 def extract_facts(messages: list[dict]) -> dict:
+    """Extract session facts from transcript messages."""
     debug_log(f"Extracting facts from {len(messages)} messages")
     user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
     all_text  = " ".join(m["content"] for m in messages if isinstance(m.get("content"), str))
@@ -83,7 +89,8 @@ def extract_facts(messages: list[dict]) -> dict:
         r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
         r'md|json|yaml|yml|toml|sh|env|sql|html|css|scss)\b'
     )
-    files = list(dict.fromkeys(m.group() for m in file_re.finditer(all_text)))[:15]
+    raw_files = list(dict.fromkeys(m.group() for m in file_re.finditer(all_text)))
+    files = filter_file_paths(raw_files)
 
     return {
         "first_prompt":    (user_msgs[0][:300].replace("\n", " ") if user_msgs else "(no messages)"),
@@ -93,14 +100,174 @@ def extract_facts(messages: list[dict]) -> dict:
     }
 
 
+def clean_html_comments(text: str) -> str:
+    """Remove HTML comments and control markers from text."""
+    return re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+
+def extract_context_from_transcript(messages: list[dict]) -> dict:
+    """Analyze transcript to extract project context for auto-populating context.md.
+
+    Returns a dict with keys: what_this_is, stack_hints, current_state,
+    architecture, gotchas. Each value is a string or list of strings.
+    """
+    context = {
+        "what_this_is": "",
+        "stack_hints": [],
+        "current_state": "",
+        "architecture": [],
+        "gotchas": [],
+    }
+
+    if not messages:
+        return context
+
+    user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
+    assistant_msgs = [m["content"] for m in messages if m.get("role") == "assistant"]
+    all_text = " ".join(m["content"] for m in messages)
+    
+    # ── What this is ──
+    # Try to extract from early assistant messages (Claude usually describes the project)
+    for msg in assistant_msgs[:5]:
+        # Look for project description patterns
+        desc_patterns = [
+            r"(?:this (?:is|appears to be|looks like) (?:a|an) )(.{20,200}?)(?:\.|$)",
+            r"(?:The project is )(.{20,200}?)(?:\.|$)",
+            r"(?:This (?:app|application|project|codebase) )(.{20,200}?)(?:\.|$)",
+        ]
+        for pattern in desc_patterns:
+            m = re.search(pattern, msg, re.IGNORECASE)
+            if m:
+                context["what_this_is"] = m.group(0).strip().rstrip(".")
+                break
+        if context["what_this_is"]:
+            break
+    
+    # ── Stack hints from conversation ──
+    # These supplement filesystem detection — things mentioned in discussion
+    stack_keywords = {
+        "next.js": "Next.js", "react": "React", "vue": "Vue.js",
+        "angular": "Angular", "svelte": "Svelte", "express": "Express.js",
+        "flask": "Flask", "django": "Django", "fastapi": "FastAPI",
+        "flutter": "Flutter", "swift": "Swift", "kotlin": "Kotlin",
+        "tailwind": "Tailwind CSS", "typescript": "TypeScript",
+        "mongodb": "MongoDB", "postgresql": "PostgreSQL", "mysql": "MySQL",
+        "redis": "Redis", "firebase": "Firebase", "supabase": "Supabase",
+        "docker": "Docker", "kubernetes": "Kubernetes",
+        "graphql": "GraphQL", "trpc": "tRPC", "prisma": "Prisma",
+        "socket.io": "Socket.io", "websocket": "WebSocket",
+        "stripe": "Stripe", "aws": "AWS", "vercel": "Vercel",
+        "railway": "Railway", "cloudflare": "Cloudflare",
+    }
+    text_lower = all_text.lower()
+    for keyword, label in stack_keywords.items():
+        if keyword in text_lower:
+            context["stack_hints"].append(label)
+    context["stack_hints"] = list(dict.fromkeys(context["stack_hints"]))[:10]
+    
+    # ── Architecture decisions ──
+    # Extract meaningful architecture decisions from conversation
+    decision_patterns = [
+        r"I\s+(?:chose|decided|picked|went\s+with|opted\s+for)\s+([A-Z].{10,100})",
+        r"(?:better\s+to\s+use)\s+([A-Z].{10,100})",
+        r"(?:we\s+should\s+use)\s+([A-Z].{10,100})",
+    ]
+    for msg in messages:
+        content = msg["content"]
+        for pattern in decision_patterns:
+            for m in re.finditer(pattern, content, re.IGNORECASE):
+                decision = m.group(0).strip().rstrip(".")
+                # Skip if it looks like regex garbage or is too short
+                if len(decision) < 20:
+                    continue
+                if "?(" in decision or "?)" in decision or ".{" in decision:
+                    continue
+                if decision not in context["architecture"]:
+                    context["architecture"].append(decision)
+    # Deduplicate while preserving order
+    seen = set()
+    clean_arch = []
+    for d in context["architecture"]:
+        if d not in seen:
+            seen.add(d)
+            clean_arch.append(d)
+    context["architecture"] = clean_arch[:5]
+    
+    # ── Gotchas ──
+    gotcha_patterns = [
+        r"(?:(?:watch out|be careful|don't forget|remember to|make sure|important:?) )(.{10,200}?)(?:\.|$)",
+        r"(?:(?:the (?:issue|problem|bug|error) (?:was|is)) )(.{10,200}?)(?:\.|$)",
+        r"(?:(?:this (?:won't work|doesn't work|breaks|fails) (?:because|if|when)) )(.{10,200}?)(?:\.|$)",
+        r"(?:MUST )(.{10,150}?)(?:\.|$)",
+    ]
+    for msg in assistant_msgs:
+        for pattern in gotcha_patterns:
+            for m in re.finditer(pattern, msg, re.IGNORECASE):
+                gotcha = m.group(0).strip().rstrip(".")
+                if len(gotcha) > 15 and gotcha not in context["gotchas"]:
+                    context["gotchas"].append(gotcha)
+    context["gotchas"] = context["gotchas"][:5]
+    
+    # ── Current state ──
+    # Summarize what was worked on from the last few user messages
+    if user_msgs:
+        topics = []
+        for msg in user_msgs[-5:]:
+            # Get first meaningful sentence
+            first_line = msg.strip().split("\n")[0][:150]
+            # Strip HTML comments and control markers (from injected context)
+            clean_line = clean_html_comments(first_line).strip()
+            if len(clean_line) > 10:
+                topics.append(clean_line)
+        if topics:
+            context["current_state"] = f"Last session worked on: {topics[0]}"
+
+    return context
+
+
+def extract_session_summary(messages: list[dict]) -> str:
+    """Extract a 2-3 sentence summary of what happened in the session."""
+    if not messages:
+        return ""
+    
+    user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
+    assistant_msgs = [m["content"] for m in messages if m.get("role") == "assistant"]
+    
+    parts = []
+    # What did the user want?
+    if user_msgs:
+        first = user_msgs[0][:200].replace("\n", " ").strip()
+        parts.append(f"Started with: {first}")
+    
+    # What did Claude do? (look at last assistant message for wrap-up)
+    if assistant_msgs:
+        last = assistant_msgs[-1][:300].replace("\n", " ").strip()
+        # Try to find a summary sentence
+        summary_patterns = [
+            r"(?:I've |I have |We've |We have )(.{20,200}?)(?:\.|!|$)",
+            r"(?:The .{5,30} (?:is|are) now )(.{10,100}?)(?:\.|!|$)",
+            r"(?:(?:Done|Finished|Completed|Fixed|Updated|Created|Added)[\.:!] )(.{10,200}?)(?:\.|!|$)",
+        ]
+        for pattern in summary_patterns:
+            m = re.search(pattern, last, re.IGNORECASE)
+            if m:
+                parts.append(m.group(0).strip())
+                break
+    
+    return " · ".join(parts) if parts else ""
+
+
 # ── Note builders ─────────────────────────────────────────────────────────────
 
-def build_session_note(slug: str, cwd: Path, session_id: str, facts: dict) -> str:
+def build_session_note(slug: str, cwd: Path, session_id: str, facts: dict, summary: str = "") -> str:
     ts = datetime.now()
     files_section = ""
     if facts["files"]:
         items = "\n".join(f"- `{f}`" for f in facts["files"])
         files_section = f"\n## Files mentioned\n\n{items}\n"
+
+    summary_section = ""
+    if summary:
+        summary_section = f"\n## Summary\n\n{summary}\n"
 
     return (
         f"---\n"
@@ -117,13 +284,14 @@ def build_session_note(slug: str, cwd: Path, session_id: str, facts: dict) -> st
         f"## Started with\n\n> {facts['first_prompt']}\n\n"
         f"## Stats\n\n"
         f"{facts['turns']} user turns · {facts['total_messages']} total messages\n"
+        f"{summary_section}"
         f"{files_section}\n"
         f"## Next steps\n\n"
         f"- [ ] _(edit in Obsidian or ask Claude to summarise)_\n"
     )
 
 
-CONTEXT_SCAFFOLD = """\
+CONTEXT_TEMPLATE = """\
 ---
 project: {slug}
 directory: {cwd}
@@ -134,58 +302,140 @@ tags: [claude-recall, context]
 # {slug}
 
 ## What this is
-
-<!-- Describe the project in 1–3 sentences -->
+{what_this_is}
 
 ## Stack
-
-<!-- e.g. Flutter · Express.js · MongoDB Atlas · Railway -->
+{stack}
 
 ## Current state
-
-<!-- What's done, in progress, blocked -->
+{current_state}
 
 ## Architecture decisions
-
-<!-- Key decisions and the reasoning behind them -->
+{architecture}
 
 ## Gotchas
-
-<!-- Tricky things to remember — env vars, ordering constraints, quirks -->
+{gotchas}
 
 ## Environment
-
-<!-- Deployment targets, service names, env var keys (never values) -->
+{environment}
 """
 
 
-def ensure_context_scaffold(project_dir: Path, slug: str, cwd: Path) -> None:
-    """Write context.md scaffold only on first encounter of this project."""
+def update_context_md(project_dir: Path, slug: str, cwd: Path,
+                      transcript_context: dict, fs_stack: dict) -> None:
+    """Create or update context.md with auto-generated content.
+    
+    On first creation: populate from transcript analysis + filesystem detection.
+    On update: merge new learnings, preserving user-written content.
+    """
     context_md = project_dir / "context.md"
-    if context_md.exists():
-        return
-    context_md.write_text(
-        CONTEXT_SCAFFOLD.format(slug=slug, cwd=cwd, date=datetime.now().strftime("%Y-%m-%d")),
-        encoding="utf-8",
-    )
-    print(
-        f"[claude-recall] Created Obsidian note: {context_md}\n"
-        f"  Open it in Obsidian and add your project details.",
-        file=sys.stderr,
-    )
+    
+    # Build auto-content for each section
+    # Stack: combine filesystem detection (reliable) + transcript hints
+    stack_items = list(dict.fromkeys(
+        fs_stack.get("stack", []) + transcript_context.get("stack_hints", [])
+    ))
+    stack_str = " · ".join(stack_items) if stack_items else ""
+    
+    what_this_is = transcript_context.get("what_this_is", "")
+    current_state = transcript_context.get("current_state", "")
+    
+    architecture_items = transcript_context.get("architecture", [])
+    architecture_str = "\n".join(f"- {d}" for d in architecture_items) if architecture_items else ""
+    
+    gotcha_items = transcript_context.get("gotchas", [])
+    gotchas_str = "\n".join(f"- {g}" for g in gotcha_items) if gotcha_items else ""
+    
+    # Environment from filesystem
+    env_parts = []
+    if fs_stack.get("env_keys"):
+        env_parts.append("Env vars: " + ", ".join(fs_stack["env_keys"][:10]))
+    if fs_stack.get("git_branch"):
+        env_parts.append(f"Git branch: {fs_stack['git_branch']}")
+    environment_str = "\n".join(env_parts) if env_parts else ""
+    
+    if not context_md.exists():
+        # ── First creation: build full template with auto-markers ──
+        def wrap_auto(section_name: str, content: str) -> str:
+            if not content.strip():
+                return f"<!-- auto:{section_name}:start -->\n<!-- auto:{section_name}:end -->"
+            return f"<!-- auto:{section_name}:start -->\n{content}\n<!-- auto:{section_name}:end -->"
+        
+        content = CONTEXT_TEMPLATE.format(
+            slug=slug,
+            cwd=cwd,
+            date=datetime.now().strftime("%Y-%m-%d"),
+            what_this_is=wrap_auto("what_this_is", what_this_is),
+            stack=wrap_auto("stack", stack_str),
+            current_state=wrap_auto("current_state", current_state),
+            architecture=wrap_auto("architecture", architecture_str),
+            gotchas=wrap_auto("gotchas", gotchas_str),
+            environment=wrap_auto("environment", environment_str),
+        )
+        
+        context_md.write_text(content, encoding="utf-8")
+        print(
+            f"[claude-recall] Created context note: {context_md}\n"
+            f"  Auto-populated with detected project info.",
+            file=sys.stderr,
+        )
+    else:
+        # ── Update: merge new content into existing ──
+        existing = context_md.read_text(encoding="utf-8")
+        updated = existing
+        
+        if stack_str:
+            updated = merge_auto_section(updated, "stack", stack_str)
+        if current_state:
+            updated = merge_auto_section(updated, "current_state", current_state)
+        if architecture_str:
+            updated = merge_auto_section(updated, "architecture", architecture_str)
+        if gotchas_str:
+            updated = merge_auto_section(updated, "gotchas", gotchas_str)
+        if environment_str:
+            updated = merge_auto_section(updated, "environment", environment_str)
+        if what_this_is:
+            updated = merge_auto_section(updated, "what_this_is", what_this_is)
+        
+        if updated != existing:
+            context_md.write_text(updated, encoding="utf-8")
+            debug_log("context.md updated with new auto-content")
 
 
 def update_index(vault_root: Path, slug: str, cwd: Path, turns: int) -> None:
-    """Append an entry to _index.md in the vault root folder."""
-    index = vault_root / "_index.md"
-    if not index.exists():
-        index.write_text(
-            "---\ntags: [claude-recall]\n---\n\n# claude-recall — project index\n\n",
-            encoding="utf-8",
-        )
-    line = f"- [{slug}](projects/{slug}/context) · `{cwd}` · {turns} turns · {now_str('%Y-%m-%d %H:%M')}\n"
-    with open(index, "a", encoding="utf-8") as f:
-        f.write(line)
+    """Update _index.md with deduplicated project entry.
+    
+    If the project already exists, updates its row in-place.
+    If new, appends a new row.
+    """
+    index_path = vault_root / "_index.md"
+    
+    # Parse existing entries (handles both old and new format)
+    entries = parse_index_entries(index_path)
+    
+    # Find or create entry for this slug
+    found = False
+    for entry in entries:
+        if entry["slug"] == slug:
+            entry["sessions"] += 1
+            entry["total_turns"] += turns
+            entry["last_active"] = now_str("%Y-%m-%d %H:%M")
+            entry["directory"] = str(cwd)  # Update in case it changed
+            found = True
+            break
+    
+    if not found:
+        entries.append({
+            "slug": slug,
+            "directory": str(cwd),
+            "sessions": 1,
+            "total_turns": turns,
+            "last_active": now_str("%Y-%m-%d %H:%M"),
+        })
+    
+    # Rebuild the index file
+    index_path.write_text(build_index_table(entries), encoding="utf-8")
+    debug_log(f"Index updated: {slug} ({'existing' if found else 'new'})")
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -235,12 +485,23 @@ def save_session() -> None:
         )
         return
 
-    # Scaffold context.md for new projects
-    ensure_context_scaffold(project_dir, slug, cwd)
+    # Extract facts and context from transcript
+    facts = extract_facts(messages)
+    transcript_context = extract_context_from_transcript(messages)
+    summary = extract_session_summary(messages)
+    
+    # Detect project stack from filesystem
+    fs_stack = detect_project_stack(cwd)
+    
+    # Auto-generate/update context.md (replaces old empty scaffold)
+    try:
+        update_context_md(project_dir, slug, cwd, transcript_context, fs_stack)
+    except Exception as e:
+        debug_log(f"Error updating context.md: {e}")
+        # Non-fatal — continue with session note
 
     # Write session note
-    facts     = extract_facts(messages)
-    note      = build_session_note(slug, cwd, session_id, facts)
+    note      = build_session_note(slug, cwd, session_id, facts, summary)
     note_path = project_dir / "sessions" / f"{now_str()}.md"
 
     debug_log(f"Writing note to: {note_path}")
@@ -255,7 +516,7 @@ def save_session() -> None:
         )
         return
 
-    # Update vault index
+    # Update vault index (deduplicated)
     update_index(vault_root, slug, cwd, facts["turns"])
 
     # Clean up session marker

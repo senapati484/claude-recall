@@ -5,8 +5,12 @@ load_context.py — claude-recall UserPromptSubmit hook.
 Fires before every user prompt. Reads project context from the Obsidian vault
 and prints it to stdout — Claude Code prepends this to Claude's system context.
 
+KEY BEHAVIOR: If no context.md exists (first session in this project), this
+script AUTO-GENERATES it by scanning the project directory — detecting stack,
+file tree, config, git info. Claude gets full context from the very first message.
+
 Storage layout in Obsidian:
-  <vault>/claude-recall/projects/<slug>/context.md      ← human-edited
+  <vault>/claude-recall/projects/<slug>/context.md      ← auto-generated + user can edit
   <vault>/claude-recall/projects/<slug>/sessions/*.md   ← auto-written by save_context.py
 
 Never exits non-zero — a failed hook would block Claude from starting.
@@ -29,37 +33,28 @@ def debug_log(msg: str) -> None:
         pass
 
 def load_context() -> None:
-    debug_log(f"=== LOAD SESSION STARTED ===")
+    debug_log("=== LOAD SESSION STARTED ===")
     debug_log(f"CWD: {os.getcwd()}")
-    debug_log(f"Args: {sys.argv}")
-    debug_log(f"stdin isatty: {sys.stdin.isatty()}")
-    debug_log(f"stdin closed: {sys.stdin.closed}")
-    
-    # Check for env vars Claude might set
-    debug_log(f"CLAUDE_SESSION_ID: {os.environ.get('CLAUDE_SESSION_ID', 'NOT SET')}")
-    debug_log(f"CLAUDE_CWD: {os.environ.get('CLAUDE_CWD', 'NOT SET')}")
     
     try:
         from utils import (
-            load_config, get_project_dir, read_hook_input, get_cwd,
+            load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
             cwd_to_slug, truncate_to_tokens, session_marker, cleanup_stale_markers,
+            is_scaffold_only, auto_generate_context_md,
         )
         debug_log("Utils imported successfully")
         
         hook_input = read_hook_input()
-        debug_log(f"Raw hook_input: {hook_input}")
         session_id = hook_input.get("session_id", "unknown")
         cwd        = get_cwd(hook_input)
         cfg        = load_config()
         
         debug_log(f"session_id={session_id}, cwd={cwd}")
-        debug_log(f"Config vault_path: {cfg.get('vault_path')}")
 
         cleanup_stale_markers()
 
-        # Session-start deduplication
+        # Session-start deduplication — only load context on first prompt
         marker = session_marker(session_id)
-        debug_log(f"Marker path: {marker}, exists: {marker.exists()}")
         if not cfg.get("load_on_every_prompt", False) and marker.exists():
             debug_log("Skipping - marker exists (session already loaded)")
             return
@@ -68,54 +63,83 @@ def load_context() -> None:
         # Resolve project in vault
         slug        = cwd_to_slug(cwd)
         project_dir = get_project_dir(cfg, slug)
-        debug_log(f"Project dir: {project_dir}")
+        context_md  = project_dir / "context.md"
+        
+        debug_log(f"slug={slug}, project_dir={project_dir}, context exists={context_md.exists()}")
+
+        # ──────────────────────────────────────────────────────────────────
+        # AUTO-GENERATE context.md if it doesn't exist or is empty scaffold
+        # This is the KEY feature — Claude has full context from first msg
+        # ──────────────────────────────────────────────────────────────────
+        needs_generation = False
+        if not context_md.exists():
+            needs_generation = True
+            debug_log("context.md does not exist — will auto-generate")
+        elif is_scaffold_only(context_md.read_text(encoding="utf-8")):
+            needs_generation = True
+            debug_log("context.md is empty scaffold — will auto-generate")
+        
+        if needs_generation:
+            try:
+                project_dir.mkdir(parents=True, exist_ok=True)
+                content = auto_generate_context_md(cwd, slug)
+                context_md.write_text(content, encoding="utf-8")
+                debug_log(f"Auto-generated context.md ({len(content)} chars)")
+                print(
+                    f"[claude-recall] Auto-generated context for '{slug}' from project files.",
+                    file=sys.stderr,
+                )
+            except Exception as exc:
+                debug_log(f"Auto-generate failed: {exc}")
+                print(f"[claude-recall] Auto-generate error: {exc}", file=sys.stderr)
+
+        # ──────────────────────────────────────────────────────
+        # Build context output for Claude
+        # ──────────────────────────────────────────────────────
         parts: list[str] = []
 
-        # Persistent context.md
-        context_md = project_dir / "context.md"
-        debug_log(f"Context md exists: {context_md.exists()}")
+        # Load context.md
         if context_md.exists():
             text = context_md.read_text(encoding="utf-8").strip()
-            if text:
+            if text and not is_scaffold_only(text):
                 text = truncate_to_tokens(text, cfg.get("max_context_tokens", 2000) // 2)
                 parts.append(f"## Project context\n\n{text}")
 
-        # Recent session notes
+        # Load recent session notes
         sessions_dir = project_dir / "sessions"
         n = cfg.get("include_recent_sessions", 2)
-        debug_log(f"Sessions dir: {sessions_dir}, n={n}")
+        session_count = 0
         if sessions_dir.exists() and n > 0:
             try:
-                recent = sorted(sessions_dir.glob("*.md"), reverse=True)[:n]
-                debug_log(f"Found {len(recent)} sessions")
-                for note in recent:
+                all_sessions = sorted(sessions_dir.glob("*.md"), reverse=True)
+                session_count = len(all_sessions)
+                for note in all_sessions[:n]:
                     t = note.read_text(encoding="utf-8").strip()
                     if t:
                         parts.append(f"## Previous session — {note.stem}\n\n{t}")
             except Exception as exc:
                 debug_log(f"Session read error: {exc}")
-                print(f"[claude-recall] Could not read sessions: {exc}", file=sys.stderr)
 
         if not parts:
-            debug_log("No context found")
-            print(
-                f"[claude-recall] No Obsidian context found for '{slug}'.\n"
-                f"  A note will be created after this session at:\n"
-                f"  {project_dir / 'context.md'}\n"
-                f"  Open it in Obsidian and add your project details.",
-                file=sys.stderr,
-            )
+            debug_log("No context found even after auto-generation")
             return
 
         body = "\n\n---\n\n".join(parts)
         body = truncate_to_tokens(body, cfg.get("max_context_tokens", 2000))
 
+        # Build header
+        header_parts = [f"Project: `{slug}`", f"Dir: `{cwd}`"]
+        if session_count > 0:
+            header_parts.append(f"Sessions: {session_count}")
+        header_parts.append(f"Loaded: {datetime.now().strftime('%H:%M')}")
+
         debug_log(f"Returning {len(body)} chars of context")
+        
         print(
             "<!-- claude-recall: context loaded from Obsidian -->\n"
-            f"Project: `{slug}`  |  Directory: `{cwd}`  "
-            f"|  Loaded: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+            f"{' | '.join(header_parts)}\n\n"
             + body
+            + "\n\n> **claude-recall**: `/recall update` (refresh) · `/recall status` · `/recall reset`\n"
         )
         
     except Exception as exc:
