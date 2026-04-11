@@ -144,9 +144,15 @@ def _check_error(text: str, errors: list) -> None:
         return  # Likely a format string like "{exc}", "{e}"
 
     error_indicators = [
-        r"(?:Error|Exception|Failed|FAILED)(?:\s+:|\s+–)?\s*[\n]?(.{10,200}?)",
+        r"(?:Error|Exception|Failed|FAILED)(?:\s+:|\s+–)?\s*(.{10,200}?)",
     ]
     text_lower = text.lower()
+    # Skip very short texts or tool result content that looks like exception dumps
+    if len(text) < 15:
+        return
+    # Skip Python traceback dumps — they contain many newlines and file paths
+    if text.count("\n") > 3 and ("traceback" in text_lower or "file " in text_lower):
+        return
     if any(indicator in text_lower for indicator in ["error:", "exception:", "failed:", "traceback"]):
         for pattern in error_indicators:
             m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
@@ -161,6 +167,11 @@ def _check_error(text: str, errors: list) -> None:
                     continue  # Probably a traceback dump
                 if len(err_text) < 15:
                     continue
+                # Skip if it contains file paths or line numbers (traceback fragment)
+                if re.search(r'[/\\]\w+\.\w+:\d+', err_text):
+                    continue
+                if re.search(r'\d+\s+\|', err_text):
+                    continue  # diff line like "10 | code"
                 if err_text not in errors:
                     errors.append(err_text)
                 break
@@ -365,45 +376,52 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
             clean_arch.append(d)
     context["architecture"] = clean_arch[:5]
 
-    # ── Gotchas (from errors + warnings) ──
+    # ── Gotchas (from assistant advice — NOT from errors) ──
     gotcha_patterns = [
-        r"(?:(?:watch out|be careful|don't forget|remember to|make sure|important:?) )(.{10,200}?)(?:\.|$)",
-        r"(?:(?:the (?:issue|problem|bug|error) (?:was|is)) )(.{10,200}?)(?:\.|$)",
-        r"(?:(?:this (?:won't work|doesn't work|breaks|fails) (?:because|if|when)) )(.{10,200}?)(?:\.|$)",
-        r"(?:MUST )(.{10,150}?)(?:\.|$)",
+        # Only capture clear advisory patterns with proper word boundaries
+        r"(?:watch out|be careful|don't forget|remember to|make sure|important)[:\s]+([A-Z][^\n]{10,150})(?:\.|$)",
+        r"(?:the (?:issue|problem|bug) (?:was|is|was caused by))[:\s]+([A-Z][^\n]{10,150})(?:\.|$)",
+        r"(?:this (?:won't work|doesn't work|breaks|fails) (?:because|when|if))[:\s]+([A-Z][^\n]{10,150})(?:\.|$)",
+        r"(?:MUST[:\s]+)([A-Z][^\n]{10,150})(?:\.|$)",
     ]
     for msg in assistant_msgs:
         for pattern in gotcha_patterns:
             for m in re.finditer(pattern, msg, re.IGNORECASE):
-                gotcha = m.group(1).strip().rstrip(".")  # group(1), not group(0)
-                # Filter out gotchas that look like code/tracebacks
-                if len(gotcha) < 10:
+                gotcha = m.group(1).strip().rstrip(".")
+                # Strict filters — gotchas must be human-readable advice, not code/fragments
+                if len(gotcha) < 15:
                     continue
-                if any(c in gotcha for c in ['{', '}', 'sys.', 'file=', '", ', '"']):
+                if any(c in gotcha for c in ['{', '}', 'sys.', 'file=', '", ', '"', '->', '::']):
+                    continue
+                # Must have reasonable alpha ratio (not mostly symbols/numbers)
+                alpha_ratio = sum(c.isalpha() for c in gotcha) / max(len(gotcha), 1)
+                if alpha_ratio < 0.5:
                     continue
                 if gotcha not in context["gotchas"]:
                     context["gotchas"].append(gotcha)
     context["gotchas"] = context["gotchas"][:5]
 
-    # Add captured errors as gotchas
-    for err in errors[:3]:
-        if err not in context["gotchas"]:
-            context["gotchas"].append(err)
+    # Skip adding captured errors to gotchas — they are too noisy and contain
+    # traceback/code fragments. The gotchas section relies solely on pattern-matched
+    # advice from assistant messages.
 
     # ── Current state ──
-    # Build from what was worked on - skip lines that look like code
+    # Build from what was worked on - skip lines that look like code/shell errors
     CODE_INDICATORS = [
         '# ', '## ', 'import ', 'from ', 'export ', 'const ', 'let ', 'var ',
         'function ', 'class ', 'def ', 'fn ', 'pub ', 'struct ', 'interface ',
         'print(', 'console.', 'return ', 'if ', 'for ', 'while ', 'switch(',
         '```', '<!-- ', '===', '---', '--- ', '/*', '*/', '//',
         'npm ', 'git ', 'python', 'pip ', 'cargo ', 'go ', 'rustc ',
-        '/Users/', '/home/', 'C:\\', '~\'', '\"', "']",
-        # Skip lines that look like file content with line numbers
-        # e.g., "565 # Map section names to headers" or "   10 | code"
+        # Shell stderr / eval error patterns
+        '(eval):', 'bash:', 'zsh:', 'sh:', '/bin/', '/usr/bin/',
+        'no matches found:', 'not found:', 'command not found:',
+        '/Users/', '/home/', 'C:\\', '~\'', '"', "']",
     ]
     # Regex to detect lines that look like "123 # comment" (file content with line numbers)
     LINE_NUM_RE = re.compile(r'^\s*\d+\s+#')
+    # Detect shell error fragments
+    SHELL_ERROR_RE = re.compile(r'^(?:\[.*?\]\s*)?(?:error|warning|failed|no matches|not found)[:\s]', re.IGNORECASE)
 
     if user_msgs:
         topics = []
@@ -417,6 +435,9 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
                 continue
             # Skip lines that look like file content with line numbers
             if LINE_NUM_RE.match(clean_line):
+                continue
+            # Skip shell error lines like "(eval):1: no matches found:"
+            if SHELL_ERROR_RE.match(clean_line):
                 continue
             # Skip lines that are mostly code-like characters
             alpha_ratio = sum(c.isalpha() for c in clean_line) / max(len(clean_line), 1)
