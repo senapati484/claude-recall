@@ -245,7 +245,7 @@ rm ~/.claude/claude-recall.json
 ## 🏗️ Architecture
 
 ```
-┌──────────────┐       ┌─────────────────┐       ┌────────────────┐
+┌──────────────┐       ┌──────────────────┐       ┌────────────────┐
 │  Claude Code │       │  claude-recall   │       │ Obsidian Vault │
 │              │       │                  │       │                │
 │  Prompt ─────┼──────►│ load_context.py  │◄──────┤ context.md     │
