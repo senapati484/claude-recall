@@ -15,10 +15,10 @@ info() { echo -e "  ${C}→${R} $1"; }
 warn() { echo -e "  ${Y}!${R} $1"; }
 
 echo ""
-echo "  ┌──────────────────────────────────────────┐"
-echo "  │   claude-recall — install                │"
-echo "  │   Persistent Obsidian memory for Claude  │"
-echo "  └──────────────────────────────────────────┘"
+echo "  ┌───────────────────────────────────────────┐"
+echo "  │   claude-recall — install                 │"
+echo "  │   Persistent Obsidian memory for Claude   │"
+echo "  └───────────────────────────────────────────┘"
 echo ""
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
@@ -204,9 +204,9 @@ fi
 
 # ── 7. Done ───────────────────────────────────────────────────────────────────
 echo ""
-echo "  ┌──────────────────────────────────────────┐"
-echo "  │   claude-recall installed  ✓             │"
-echo "  └──────────────────────────────────────────┘"
+echo "  ┌───────────────────────────────┐"
+echo "  │   claude-recall installed  ✓  │"
+echo "  └───────────────────────────────┘"
 echo ""
 echo "  Vault:    $VAULT_PATH"
 echo "  Notes at: $VAULT_CR/projects/<project>/"
