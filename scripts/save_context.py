@@ -17,8 +17,20 @@ Never exits non-zero.
 import json
 import re
 import sys
+import traceback
+import os
 from datetime import datetime
 from pathlib import Path
+
+DEBUG_LOG = Path.home() / ".claude" / "claude-recall-debug.log"
+
+def debug_log(msg: str) -> None:
+    """Write debug message to log file."""
+    try:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] SAVE: {msg}\n")
+    except Exception:
+        pass
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
@@ -26,8 +38,6 @@ from utils import (
     cwd_to_slug, now_str, session_marker, cleanup_stale_markers,
 )
 
-
-# ── Transcript ────────────────────────────────────────────────────────────────
 
 def parse_transcript(path: str) -> list[dict]:
     messages = []
@@ -39,8 +49,24 @@ def parse_transcript(path: str) -> list[dict]:
                     continue
                 try:
                     obj = json.loads(line)
-                    if isinstance(obj.get("content"), str) and obj.get("role"):
-                        messages.append({"role": obj["role"], "content": obj["content"]})
+                    msg = obj.get("message", {})
+                    role = msg.get("role")
+                    content = msg.get("content")
+                    if not role or not content:
+                        continue
+                    content_str = ""
+                    if isinstance(content, str):
+                        content_str = content
+                    elif isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, dict):
+                                continue
+                            if block.get("type") == "text":
+                                content_str += str(block.get("text", ""))
+                            elif block.get("type") == "tool_result":
+                                content_str += str(block.get("content", ""))
+                    if content_str.strip():
+                        messages.append({"role": role, "content": content_str})
                 except json.JSONDecodeError:
                     continue
     except Exception as exc:
@@ -49,10 +75,10 @@ def parse_transcript(path: str) -> list[dict]:
 
 
 def extract_facts(messages: list[dict]) -> dict:
+    debug_log(f"Extracting facts from {len(messages)} messages")
     user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
     all_text  = " ".join(m["content"] for m in messages if isinstance(m.get("content"), str))
 
-    # Source files mentioned in the conversation
     file_re = re.compile(
         r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
         r'md|json|yaml|yml|toml|sh|env|sql|html|css|scss)\b'
@@ -165,29 +191,44 @@ def update_index(vault_root: Path, slug: str, cwd: Path, turns: int) -> None:
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def save_session() -> None:
+    debug_log("=== SAVE SESSION STARTED ===")
+    debug_log(f"CWD: {os.getcwd()}, Args: {sys.argv}")
+    
     hook_input      = read_hook_input()
+    debug_log(f"Hook input: {hook_input}")
+    
     session_id      = hook_input.get("session_id", now_str())
     transcript_path = hook_input.get("transcript_path", "")
     cwd             = get_cwd(hook_input)
     cfg             = load_config()
 
+    debug_log(f"session_id={session_id}, transcript={transcript_path}, cwd={cwd}")
+    debug_log(f"Config vault: {cfg.get('vault_path')}")
+
     cleanup_stale_markers()
 
     if not cfg.get("save_sessions", True):
+        debug_log("save_sessions disabled, returning")
         return
 
     messages = parse_transcript(transcript_path) if transcript_path else []
+    debug_log(f"Parsed {len(messages)} messages from transcript")
     if not messages:
+        debug_log("No messages - returning early")
         return   # Nothing happened this session — skip
 
     slug        = cwd_to_slug(cwd)
     vault_root  = get_vault_root(cfg)
     project_dir = get_project_dir(cfg, slug)
 
+    debug_log(f"slug={slug}, vault_root={vault_root}, project_dir={project_dir}")
+
     # Edge case: read-only vault — wrap in try/except to avoid hook failure
     try:
         (project_dir / "sessions").mkdir(parents=True, exist_ok=True)
-    except PermissionError:
+        debug_log(f"Created sessions dir: {project_dir / 'sessions'}")
+    except PermissionError as e:
+        debug_log(f"Permission error: {e}")
         print(
             f"[claude-recall] Cannot write to vault — check permissions: {project_dir}",
             file=sys.stderr,
@@ -202,10 +243,12 @@ def save_session() -> None:
     note      = build_session_note(slug, cwd, session_id, facts)
     note_path = project_dir / "sessions" / f"{now_str()}.md"
 
+    debug_log(f"Writing note to: {note_path}")
     try:
         note_path.write_text(note, encoding="utf-8")
-    except PermissionError:
-        # Edge case: read-only sessions directory
+        debug_log("Note written successfully")
+    except PermissionError as e:
+        debug_log(f"Permission error writing note: {e}")
         print(
             f"[claude-recall] Cannot write session note — check permissions: {note_path}",
             file=sys.stderr,
@@ -220,6 +263,7 @@ def save_session() -> None:
     if marker.exists():
         marker.unlink(missing_ok=True)
 
+    debug_log(f"=== SAVED: {note_path} ===")
     print(f"[claude-recall] Saved to Obsidian → {note_path}", file=sys.stderr)
 
 
@@ -227,5 +271,6 @@ if __name__ == "__main__":
     try:
         save_session()
     except Exception as exc:
+        debug_log(f"ERROR: {exc}\n{traceback.format_exc()}")
         print(f"[claude-recall] save error: {exc}", file=sys.stderr)
         sys.exit(0)

@@ -100,7 +100,8 @@ info "Downloading claude-recall..."
 if command -v git &>/dev/null; then
   if [ -d "$INSTALL_DIR/.git" ]; then
     info "Updating existing install via git pull..."
-    git -C "$INSTALL_DIR" pull --quiet
+    git -C "$INSTALL_DIR" fetch --quiet
+    git -C "$INSTALL_DIR" reset --hard --quiet origin/main
   elif [ -d "$INSTALL_DIR" ]; then
     # Edge case: non-git existing install (curl-installed) — replace cleanly
     info "Replacing non-git install..."

@@ -9,10 +9,20 @@ import json
 import os
 import re
 import sys
+import traceback
 from datetime import datetime
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".claude" / "claude-recall.json"
+DEBUG_LOG = Path.home() / ".claude" / "claude-recall-debug.log"
+
+def debug_log(msg: str) -> None:
+    """Write debug message to log file."""
+    try:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] UTILS: {msg}\n")
+    except Exception:
+        pass
 
 DEFAULT_CONFIG = {
     "vault_path": "",                  # Required — set by install.sh
@@ -103,13 +113,27 @@ def get_project_dir(cfg: dict, slug: str) -> Path:
 
 
 def read_hook_input() -> dict:
-    """Read Claude Code hook JSON from stdin."""
+    """Read Claude Code hook JSON from stdin or environment variables."""
+    # First try stdin
     try:
         raw = sys.stdin.read().strip()
         if raw:
+            debug_log(f"read_hook_input: got stdin data: {raw[:100]}")
             return json.loads(raw)
-    except Exception:
-        pass
+    except Exception as e:
+        debug_log(f"read_hook_input: stdin error: {e}")
+    
+    # Try environment variables
+    for key in ["CLAUDE_HOOK_INPUT", "CLAUDE_SESSION_ID", "CLAUDE_CWD", "HOOK_INPUT"]:
+        val = os.environ.get(key)
+        if val:
+            debug_log(f"read_hook_input: found env {key}={val[:50]}")
+            try:
+                return json.loads(val)
+            except:
+                pass
+    
+    debug_log("read_hook_input: no input found, returning empty dict")
     return {}
 
 
