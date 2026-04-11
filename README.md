@@ -1,7 +1,7 @@
 <p align="center">
   <a href="https://github.com/senapati484/claude-recall">
     <img src="data/obsidian.png" width="70" alt="Obsidian">
-    &nbsp;&nbsp;⟷&nbsp;&nbsp;
+    &nbsp;&nbsp;+&nbsp;&nbsp;
     <img src="data/claude.svg" width="70" alt="Claude">
   </a>
 </p>
