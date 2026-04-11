@@ -97,7 +97,14 @@ ok "Config written → $CONFIG"
 echo ""
 info "Downloading claude-recall..."
 
-if command -v git &>/dev/null; then
+if [ -f "./SKILL.md" ] && [ -d "./scripts" ]; then
+  info "Local repository detected. Installing directly from local files..."
+  rm -rf "$INSTALL_DIR"
+  mkdir -p "$INSTALL_DIR"
+  cp -R ./* "$INSTALL_DIR/"
+  rm -rf "$INSTALL_DIR/.git" 2>/dev/null || true
+  ok "Copied → $INSTALL_DIR"
+elif command -v git &>/dev/null; then
   if [ -d "$INSTALL_DIR/.git" ]; then
     info "Updating existing install via git pull..."
     git -C "$INSTALL_DIR" fetch --quiet
@@ -119,6 +126,7 @@ else
     "scripts/utils.py" \
     "scripts/load_context.py" \
     "scripts/save_context.py" \
+    "scripts/recall_update.py" \
     "references/hook-api.md" \
     "references/context-structure.md"
   do
