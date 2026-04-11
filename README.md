@@ -1,10 +1,8 @@
 <p align="center">
   <a href="https://github.com/senapati484/claude-recall">
-    <img src="data/obsidian.png" width="70" alt="Obsidian" align="absmiddle">
-    &nbsp;&nbsp;&nbsp;&nbsp;
-    <img src="data/plus.svg" width="24" alt="+" align="absmiddle">
-    &nbsp;&nbsp;&nbsp;&nbsp;
-    <img src="data/claude.svg" width="70" alt="Claude" align="absmiddle">
+    <img src="data/obsidian.png" width="70" height="70" alt="Obsidian">
+    <img src="data/plus.svg" alt="+">
+    <img src="data/claude.svg" width="70" height="70" alt="Claude">
   </a>
 </p>
 
