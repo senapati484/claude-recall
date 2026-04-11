@@ -142,20 +142,19 @@ chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
 # ── 5a. Install llama-cpp-python ─────────────────────────────────────────────
 echo ""
 info "Installing llama-cpp-python..."
-try:
-    if python3 -c "import llama_cpp" 2>/dev/null; then
-        ok "llama-cpp-python already installed"
+if python3 -c "import llama_cpp" 2>/dev/null; then
+    ok "llama-cpp-python already installed"
+else
+    echo "  Installing llama-cpp-python (CPU build, this may take a few minutes)..."
+    INSTALL_LOG="$HOME/.claude/claude-recall-install.log"
+    if pip3 install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
+        ok "llama-cpp-python installed"
+    elif python3 -c "import llama_cpp" 2>/dev/null; then
+        ok "llama-cpp-python installed"
     else
-        echo "  Installing llama-cpp-python (CPU build)..."
-        pip3 install llama-cpp-python --quiet 2>/dev/null || pip3 install llama-cpp-python --quiet
-        if python3 -c "import llama_cpp" 2>/dev/null; then
-            ok "llama-cpp-python installed"
-        else
-            warn "llama-cpp-python install failed — LLM summaries disabled"
-        fi
+        warn "llama-cpp-python install failed — LLM summaries disabled"
     fi
-except Exception as e:
-    warn "llama-cpp-python error: $e — LLM summaries disabled"
+fi
 
 # ── 5b. Download Qwen2.5 0.5B GGUF model ─────────────────────────────────────
 MODEL_DIR="$HOME/.claude/models"
@@ -166,41 +165,34 @@ echo ""
 info "Checking local model..."
 mkdir -p "$MODEL_DIR"
 
-if [ -f "$MODEL_FILE" ]; then
+if [ -f "$MODEL_FILE" ] && [ -s "$MODEL_FILE" ]; then
     ok "Model already present: $MODEL_FILE"
-elif [ -s "$MODEL_FILE" ]; then
-    ok "Model file exists: $MODEL_FILE"
 else
-    echo "  Downloading Qwen2.5 0.5B (~380 MB)..."
-    try:
-        if command -v curl &>/dev/null; then
-            curl -L --progress-bar "$MODEL_URL" -o "$MODEL_FILE" 2>/dev/null || {
-                warn "Download failed"
-                rm -f "$MODEL_FILE"
-            }
-        elif command -v wget &>/dev/null; then
-            wget -q "$MODEL_URL" -O "$MODEL_FILE" 2>/dev/null || {
-                warn "Download failed"
-                rm -f "$MODEL_FILE"
-            }
-        else
-            warn "No curl/wget — download manually:"
-            warn "  $MODEL_URL"
+    echo "  Downloading Qwen2.5 0.5B (~380 MB, this may take a few minutes)..."
+    DOWNLOADED=0
+    if command -v curl &>/dev/null; then
+        if curl -fL "$MODEL_URL" -o "$MODEL_FILE" 2>&1; then
+            DOWNLOADED=1
         fi
-        [ -f "$MODEL_FILE" ] && ok "Model saved → $MODEL_FILE"
-    except Exception as e:
-        warn "Model download error: $e"
+    elif command -v wget &>/dev/null; then
+        if wget -q "$MODEL_URL" -O "$MODEL_FILE" 2>&1; then
+            DOWNLOADED=1
+        fi
+    else
+        warn "No curl or wget found — install one to download the LLM model"
+    fi
 
-    # Verify download
-    if [ ! -f "$MODEL_FILE" ]; then
-        warn "Model not found — LLM features disabled"
+    if [ "$DOWNLOADED" -eq 1 ] && [ -f "$MODEL_FILE" ] && [ -s "$MODEL_FILE" ]; then
+        ok "Model saved → $MODEL_FILE"
+    else
+        rm -f "$MODEL_FILE"
+        warn "Model download failed — LLM features disabled"
     fi
 fi
 
 # ── 5. Register hooks ─────────────────────────────────────────────────────────
 echo ""
 info "Registering hooks in $SETTINGS..."
-SCAN_CMD="python3 $INSTALL_DIR/scripts/scan_project.py"
 
 LOAD_CMD="python3 $INSTALL_DIR/scripts/load_context.py"
 SAVE_CMD="python3 $INSTALL_DIR/scripts/save_context.py"

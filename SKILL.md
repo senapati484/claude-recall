@@ -2,20 +2,21 @@
 name: claude-recall
 description: >
   Always-on Claude Code skill that bridges Claude with an Obsidian vault for persistent
-  project memory. Automatically loads project context from Obsidian before every prompt
+  project memory. Automatically loads project context from Obsidian before every session
   (UserPromptSubmit hook) and saves a structured session note back to the vault on exit
-  (Stop hook). Zero manual invocation — hooks fire on every session automatically.
+  (Stop hook). Zero manual invocation — hooks fire automatically on each session.
 
-  Context is AUTO-GENERATED — Claude analyzes transcripts and project files to populate
-  context.md with stack, architecture decisions, gotchas, and current state. Users never
-  need to manually edit files. Auto-generated sections are marked with `<!-- auto:*:start/end -->`
-  markers. User-written content outside these markers is never overwritten.
+  Context is AUTO-GENERATED using a local LLM (Qwen2.5 0.5B GGUF via llama-cpp-python).
+  Claude analyzes transcripts and project files to populate context.md with stack,
+  architecture decisions, gotchas, and current state. Users never need to manually edit.
+  Auto-generated sections are marked with `<!-- auto:*:start/end -->` markers.
+  User-written content outside these markers is never overwritten.
 
   The /recall command lets users trigger on-demand context updates from the terminal.
 
-  Storage: <vault>/claude-recall/projects/<project-slug>/context.md (auto-populated,
-  user can edit) and sessions/YYYY-MM-DD_HH-MM.md (auto-written). Project slug is derived
-  from the directory Claude Code was launched in.
+  Storage: <vault>/claude-recall/projects/<project-slug>/context.md (auto-populated)
+  and sessions/YYYY-MM-DD_HH-MM.md (auto-written). Project slug is derived from
+  the directory Claude Code was launched in.
 
   Install from GitHub (one command):
     curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/install.sh | bash
@@ -28,30 +29,53 @@ description: >
 # claude-recall
 
 Obsidian-backed persistent memory for Claude Code. Install once, works on every session.
-**All context is auto-generated** — no manual Obsidian editing required.
+**All context is auto-generated** using a local LLM — no manual Obsidian editing required.
+
+## Session Model
+
+A **session = one terminal session** (open terminal → close terminal or `/exit`).
+This is NOT per-prompt. The session marker at `~/.claude/.recall_<session_id>` prevents
+context re-injection after the first prompt of a session.
+
+```
+Terminal session opens → UserPromptSubmit fires → context loaded ONCE
+Terminal session continues → UserPromptSubmit fires → SKIPPED (marker exists)
+Terminal session closes → Stop hook fires → session note written, context updated
+```
 
 ## How It Works
 
 ```
-Session start  →  load_context.py  →  reads Obsidian vault  →  stdout → Claude context
-Session exit   →  save_context.py  →  analyzes transcript   →  updates context.md + writes session note
-On /recall     →  recall_update.py →  scans project files   →  updates context.md
+Session start  →  load_context.py  →  reads vault  →  stdout → Claude context
+Session exit   →  save_context.py  →  LLM analyzes transcript → updates context.md + session note
+/recall        →  recall_update.py →  LLM scans project → updates context.md
 ```
 
 Both hooks run via Claude Code hooks in `~/.claude/settings.json`. No invocation needed.
 The `/recall` command is invoked directly by the user during a Claude session.
 
+## LLM Model
+
+claude-recall uses **Qwen2.5 0.5B Instruct GGUF** (~380 MB) run locally via llama-cpp-python.
+The model is auto-downloaded on first use if missing, or during install.sh.
+
+- Model location: `~/.claude/models/qwen2.5-0.5b-instruct-q4_k_m.gguf`
+- If model is missing at runtime: auto-downloaded from HuggingFace (~380 MB)
+- If download fails: gracefully falls back to filesystem-only context
+- LLM is used for:
+  - Session summarization (what was done, decisions, next steps)
+  - Project context generation (via /recall update)
+  - Enhanced context.md updates after each session
+
 ---
 
 ## /recall Commands
 
-These commands can be used during any Claude Code session:
-
 | Command | What it does |
 |---------|-------------|
-| `/recall` or `/recall update` | Scan current project directory and update context.md with detected stack, structure, git info |
-| `/recall status` | Show what claude-recall knows about this project (context.md content, session count, index entry) |
-| `/recall reset` | Regenerate context.md from scratch (backs up old file, preserves sessions) |
+| `/recall` or `/recall update` | Scan project with LLM and update context.md |
+| `/recall status` | Show what claude-recall knows about this project |
+| `/recall reset` | Delete context.md and regenerate from scratch |
 
 **When Claude sees these commands, run:**
 ```bash
@@ -64,11 +88,11 @@ Where `<action>` is `update`, `status`, or `reset`, and `<cwd>` is the current w
 
 ## Auto-Context Generation
 
-Claude automatically generates and updates `context.md` content — **users never need to manually edit in Obsidian** (but they can):
+Claude automatically generates and updates `context.md` content:
 
-- **On first session**: Analyzes transcript + scans project files (package.json, etc.) to auto-populate context
-- **On every session end**: Merges new learnings — stack changes, architecture decisions, gotchas
-- **On `/recall update`**: Scans filesystem for package.json/pubspec.yaml/etc., git info, env vars
+- **On first session load**: Analyzes transcript + scans project files to auto-populate context
+- **On every session end**: LLM analyzes full transcript → merges new learnings into context.md
+- **On `/recall update`**: LLM scans filesystem for stack, structure, and README → updates context.md
 
 ### Auto-marker system
 Auto-generated content is wrapped in markers:
@@ -82,13 +106,6 @@ Next.js 16 · Tailwind CSS · TypeScript
 - **Inside markers**: Managed by claude-recall, updated automatically
 - **Outside markers**: User-owned, NEVER modified by auto-updates
 
-### Token savings
-Without claude-recall, every new session requires Claude to re-discover the project:
-- What framework? What's the file structure? What was I working on?
-- This burns 500–2000+ tokens on repeated exploration
-
-With claude-recall, this context is pre-loaded in ~200 tokens, saving significant token usage on every session.
-
 ---
 
 ## Install
@@ -101,8 +118,10 @@ The installer:
 1. Checks Python 3 + Claude Code are present
 2. Asks for your Obsidian vault path (once — saved to `~/.claude/claude-recall.json`)
 3. Clones the repo to `~/.claude/skills/claude-recall/`
-4. Registers `UserPromptSubmit` and `Stop` hooks in `~/.claude/settings.json`
-5. Creates `<vault>/claude-recall/` folder structure
+4. Installs `llama-cpp-python` via pip (if not present)
+5. Downloads Qwen2.5 0.5B GGUF model to `~/.claude/models/` (~380 MB)
+6. Registers `UserPromptSubmit` and `Stop` hooks in `~/.claude/settings.json`
+7. Creates `<vault>/claude-recall/` folder structure
 
 **Then restart Claude Code.**
 
@@ -139,14 +158,31 @@ outside the auto-markers. Claude reads it before your first message every sessio
 
 ## Scripts
 
-- `scripts/load_context.py` — `UserPromptSubmit` hook. Reads `context.md` + last N session
-  notes from the vault, prints them to stdout. Shows `/recall` command hints.
-- `scripts/save_context.py` — `Stop` hook. Parses session transcript, extracts context
-  (stack, decisions, gotchas), auto-updates `context.md`, writes session note, updates `_index.md`.
-- `scripts/recall_update.py` — `/recall` command. Scans project filesystem to detect stack,
-  structure, and config. Updates context.md with findings.
-- `scripts/utils.py` — shared helpers: config loading, vault path resolution, slug generation,
-  token truncation, hook I/O, stack detection, auto-marker merging, index dedup.
+- `scripts/load_context.py` — `UserPromptSubmit` hook. Fires once per session.
+  - Session deduplication via `~/.claude/.recall_<session_id>` marker
+  - Auto-generates context.md on first load if missing
+  - Loads context.md + last N session notes → stdout for Claude
+- `scripts/save_context.py` — `Stop` hook. Fires once per terminal session.
+  - Parses full transcript (all messages, tool calls, errors, file ops)
+  - Calls LLM to generate structured summary (summary, decisions, files, next_steps)
+  - Updates context.md auto-sections with session learnings
+  - Writes session note to sessions/YYYY-MM-DD_HH-MM.md
+  - Updates _index.md
+- `scripts/summarize.py` — LLM session summariser.
+  - Loads Qwen GGUF via llama-cpp-python
+  - Auto-downloads model if missing
+  - Returns structured JSON: summary, decisions, files_and_roles, next_steps, keywords
+- `scripts/recall_update.py` — `/recall` command.
+  - `update`: LLM generates rich project context from README + filesystem
+  - `status`: prints current context.md
+  - `reset`: regenerates context.md from scratch
+- `scripts/utils.py` — shared helpers:
+  - `ensure_model()` — auto-downloads model from HuggingFace if missing
+  - `llm_available()` — checks model + llama_cpp import
+  - `auto_generate_context_md()` — filesystem-only context scaffold
+  - `merge_auto_section()` — preserves user content outside auto-markers
+  - `detect_project_stack()` — scans package.json, requirements.txt, etc.
+  - `generate_file_tree()` — project tree respecting .gitignore patterns
 
 ---
 
@@ -181,7 +217,8 @@ outside the auto-markers. Claude reads it before your first message every sessio
 | "Vault not found" error | Check vault_path in config; verify drive is mounted |
 | Sessions not saving | Verify vault is writable; check `save_sessions: true` in config |
 | Wrong project loaded | Launch `claude` from the correct project directory |
-| Context.md is empty | Run `/recall update` to populate from project files |
+| Context.md is empty | Run `/recall update` to populate with LLM |
+| LLM not generating | Check `~/.claude/models/qwen2.5-0.5b-instruct-q4_k_m.gguf` exists |
 | Hook errors | Run `echo '{"cwd":"'$(pwd)'","session_id":"t"}' \| python3 ~/.claude/skills/claude-recall/scripts/load_context.py` |
 | Re-install / update | Re-run the `curl` install command — detects existing install |
 
@@ -194,6 +231,6 @@ outside the auto-markers. Claude reads it before your first message every sessio
 - **Editing context**: guide to `<vault>/claude-recall/projects/<slug>/context.md` in Obsidian
   - Auto-generated sections are inside `<!-- auto:*:start/end -->` markers
   - User can add their own content anywhere outside markers
-- **Team usage**: commit `context.md` to git, ignore `sessions/`; team shares Claude memory
+- **LLM model missing**: explain auto-download or manual download from HuggingFace
 - **Token savings**: explain that pre-loaded context avoids repeated codebase discovery
 - **/recall commands**: run `recall_update.py` when user asks for context refresh

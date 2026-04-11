@@ -14,7 +14,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils import get_model_path, llm_available
+from utils import get_model_path, llm_available, ensure_model
 
 # Prompt template — kept short so it fits in a 2048-token context window
 _SYSTEM = (
@@ -47,12 +47,12 @@ Rules:
 
 
 def _build_prompt(messages: list[dict]) -> str:
-    """Format the last 8 user+assistant turns into a readable transcript string."""
-    recent = [m for m in messages if m.get("role") in ("user", "assistant")][-16:]
+    """Format the last 32 user+assistant turns into a readable transcript string."""
+    recent = [m for m in messages if m.get("role") in ("user", "assistant")][-32:]
     lines = []
     for m in recent:
         role = "User" if m["role"] == "user" else "Claude"
-        content = str(m.get("content", ""))[:600]  # cap per-message to save tokens
+        content = str(m.get("content", ""))[:800]  # cap per-message to save tokens
         lines.append(f"{role}: {content}")
     return "\n\n".join(lines)
 
@@ -64,11 +64,12 @@ def generate_summary(messages: list[dict]) -> dict | None:
     Returns a dict with keys: summary, decisions, files_and_roles,
     next_steps, keywords — or None if the model is unavailable or fails.
 
-    The caller (save_context.py) should fall back to extract_facts()
-    when this returns None.
+    If the model file is missing, attempts to auto-download it from HuggingFace.
     """
     if not llm_available():
-        return None
+        # Try to auto-download the model
+        if not ensure_model():
+            return None
 
     try:
         from llama_cpp import Llama

@@ -48,6 +48,7 @@ from utils import (
     cwd_to_slug, now_str, session_marker, cleanup_stale_markers,
     filter_file_paths, detect_project_stack, is_scaffold_only,
     parse_index_entries, merge_auto_section, build_index_table,
+    ensure_model,
 )
 
 
@@ -680,11 +681,13 @@ def build_key_files_section(files_changed: set, all_files: list) -> str:
 
 def update_context_md(project_dir: Path, slug: str, cwd: Path,
                       transcript_context: dict, fs_stack: dict,
-                      git_changes: dict = None) -> None:
+                      git_changes: dict = None,
+                      llm_data: dict | None = None) -> None:
     """Create or update context.md with auto-generated content.
 
     On first creation: populate from transcript analysis + filesystem detection.
     On update: merge new learnings, preserving user-written content.
+    Uses llm_data (if available) for richer context extraction.
     """
     context_md = project_dir / "context.md"
     git_changes = git_changes or {}
@@ -694,7 +697,12 @@ def update_context_md(project_dir: Path, slug: str, cwd: Path,
     stack_items = fs_stack.get("stack", [])
     stack_str = " · ".join(stack_items) if stack_items else ""
 
-    what_this_is = transcript_context.get("what_this_is", "")
+    # Use LLM summary for what_this_is if available
+    if llm_data and llm_data.get("summary"):
+        what_this_is = llm_data["summary"].replace("\n", " ")[:200]
+    else:
+        what_this_is = transcript_context.get("what_this_is", "")
+
     current_state = transcript_context.get("current_state", "")
 
     # Key files: from git changes + tool operations
@@ -864,7 +872,18 @@ def save_session() -> None:
     facts    = extract_facts(transcript)
     llm_data = None
     if _HAS_LLM:
-        llm_data = _llm_summary(messages)
+        # Ensure model is available (auto-download if missing) before calling LLM
+        if ensure_model():
+            llm_data = _llm_summary(messages)
+
+    # Extract context from transcript for updating context.md
+    transcript_context = extract_context_from_transcript(transcript, cwd)
+    fs_stack = detect_project_stack(cwd)
+    git_changes = extract_git_changes(cwd) if cwd.exists() else {}
+
+    # Update context.md with session learnings (auto-sections only)
+    update_context_md(project_dir, slug, cwd, transcript_context, fs_stack, git_changes, llm_data)
+
     note = build_session_note(slug, cwd, session_id, facts, llm_data)
     note_path = project_dir / "sessions" / f"{now_str()}.md"
 

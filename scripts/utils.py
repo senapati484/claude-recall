@@ -807,6 +807,42 @@ def get_model_path() -> Path:
     return Path.home() / ".claude" / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
 
+def ensure_model(silent: bool = False) -> bool:
+    """
+    Ensure the Qwen GGUF model is available at ~/.claude/models/.
+    If the model file is missing, attempt to download from HuggingFace.
+    Returns True if the model is available, False otherwise.
+    """
+    model_path = get_model_path()
+    if model_path.exists():
+        return True
+
+    MODEL_URL = (
+        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+        "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+    )
+    model_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if not silent:
+        print(
+            "[claude-recall] LLM model not found — downloading ~380 MB from HuggingFace...",
+            file=sys.stderr,
+        )
+
+    try:
+        import urllib.request
+        urllib.request.urlretrieve(MODEL_URL, str(model_path))
+        if model_path.exists():
+            if not silent:
+                print(f"[claude-recall] Model saved → {model_path}", file=sys.stderr)
+            return True
+    except Exception as e:
+        if not silent:
+            print(f"[claude-recall] Model download failed: {e}", file=sys.stderr)
+
+    return False
+
+
 def llm_available() -> bool:
     """
     True if both llama-cpp-python is importable AND the model file exists.

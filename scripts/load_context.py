@@ -41,7 +41,8 @@ def load_context() -> None:
         from utils import (
             load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
             cwd_to_slug, truncate_to_tokens, session_marker, cleanup_stale_markers,
-            is_scaffold_only, auto_generate_context_md,
+            is_scaffold_only, auto_generate_context_md, detect_project_stack,
+            ensure_model, llm_available, get_model_path,
         )
         debug_log("Utils imported successfully")
         
