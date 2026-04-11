@@ -95,20 +95,27 @@ def load_context() -> None:
 
         # ──────────────────────────────────────────────────────
         # Build context output for Claude
+        # Token budget: 2000 total
+        # - context.md: 800 tokens
+        # - each session: 400 tokens (2 sessions = 800 tokens)
+        # - header/footer: ~200 tokens
+        # - gaps/separators: ~200 tokens
         # ──────────────────────────────────────────────────────
         parts: list[str] = []
+        max_ctx = cfg.get("max_context_tokens", 2000)
 
-        # Load context.md
+        # Load context.md (800 tokens)
         if context_md.exists():
             text = context_md.read_text(encoding="utf-8").strip()
             if text and not is_scaffold_only(text):
-                text = truncate_to_tokens(text, cfg.get("max_context_tokens", 2000) // 2)
+                text = truncate_to_tokens(text, int(max_ctx * 0.4))
                 parts.append(f"## Project context\n\n{text}")
 
-        # Load recent session notes
+        # Load recent session notes (400 tokens each)
         sessions_dir = project_dir / "sessions"
         n = cfg.get("include_recent_sessions", 2)
         session_count = 0
+        session_summaries = []  # For header: tool counts and changes summary
         if sessions_dir.exists() and n > 0:
             try:
                 all_sessions = sorted(sessions_dir.glob("*.md"), reverse=True)
@@ -116,6 +123,8 @@ def load_context() -> None:
                 for note in all_sessions[:n]:
                     t = note.read_text(encoding="utf-8").strip()
                     if t:
+                        # Truncate individual session notes
+                        t = truncate_to_tokens(t, int(max_ctx * 0.2))
                         parts.append(f"## Previous session — {note.stem}\n\n{t}")
             except Exception as exc:
                 debug_log(f"Session read error: {exc}")
@@ -125,7 +134,7 @@ def load_context() -> None:
             return
 
         body = "\n\n---\n\n".join(parts)
-        body = truncate_to_tokens(body, cfg.get("max_context_tokens", 2000))
+        body = truncate_to_tokens(body, max_ctx)
 
         # Build header
         header_parts = [f"Project: `{slug}`", f"Dir: `{cwd}`"]

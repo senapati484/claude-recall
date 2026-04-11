@@ -567,6 +567,7 @@ def merge_auto_section(existing_text: str, section_name: str, new_content: str) 
         "what_this_is": "## What this is",
         "stack": "## Stack",
         "current_state": "## Current state",
+        "key_files": "## Key files",
         "architecture": "## Architecture decisions",
         "gotchas": "## Gotchas",
         "environment": "## Environment",
@@ -587,7 +588,7 @@ def merge_auto_section(existing_text: str, section_name: str, new_content: str) 
     return existing_text.rstrip() + f"\n\n{header}\n{new_block}\n"
 
 
-def generate_file_tree(cwd: Path, max_depth: int = 3, max_files: int = 80) -> str:
+def generate_file_tree(cwd: Path, max_depth: int = 2, max_files: int = 40) -> str:
     """Generate a compact file tree of the project directory.
     
     Respects .gitignore patterns, skips common noise directories.
@@ -663,7 +664,7 @@ def auto_generate_context_md(cwd: Path, slug: str) -> str:
     instant context without requiring manual editing.
     """
     fs = detect_project_stack(cwd)
-    tree = generate_file_tree(cwd, max_depth=3, max_files=60)
+    tree = generate_file_tree(cwd, max_depth=2, max_files=40)
     
     # Build stack string
     stack_str = " · ".join(fs.get("stack", [])) if fs.get("stack") else "Not detected"

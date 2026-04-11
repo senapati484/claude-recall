@@ -97,6 +97,11 @@ A blood donation platform connecting donors with blood banks.
 ## Stack
 Flutter · Express.js · MongoDB Atlas · Railway
 
+## Key files
+- `lib/auth/jwt_handler.dart`
+- `server/routes/auth.ts`
+- `lib/screens/donor_screen.dart`
+
 ## Architecture decisions
 - JWT auth with refresh tokens stored in secure storage
 - Image uploads compressed client-side before S3
@@ -125,10 +130,31 @@ tags: [claude-recall, session]
 ## Started with
 > Add JWT auth to the Express routes
 
-## Files mentioned
+## Stats
+8 user turns · 12 total messages · 5 tool calls
+
+## Summary
+Started with: Add JWT auth... · 3 file(s) modified · Tools used: Readx2, Editx2, Bashx1
+
+## Files touched
 - server/auth.js
 - routes/api.js
 - lib/screens/home_screen.dart
+
+## Tools used
+- `Read`: 2x
+- `Edit`: 2x
+- `Bash`: 1x
+
+## Git changes
+```
+server/auth.js   |  25 +++++++++
+routes/api.js    |  10 ++++
+2 files changed, 35 insertions(+)
+```
+
+## Next steps
+- [ ] _(edit in Obsidian or ask Claude to summarise)_
 ```
 
 ---

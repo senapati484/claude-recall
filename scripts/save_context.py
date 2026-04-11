@@ -123,11 +123,19 @@ def parse_transcript_full(path: str) -> dict:
 
 
 def _check_error(text: str, errors: list) -> None:
-    """Check if text contains an error and extract it."""
+    """Check if text contains an error and extract it.
+
+    Only captures clean, readable error messages. Skips:
+    - Python format strings like "{exc}", "{e}"
+    - Traceback fragments without actual error messages
+    - Very short or malformed strings
+    """
+    # Skip if text looks like Python code or contains format strings
+    if "{" in text and "}" in text and ("exc" in text or "e}" in text):
+        return  # Likely a format string like "{exc}", "{e}"
+
     error_indicators = [
-        r"(?:Error|Exception|Failed|FAILED)(?:\s+:|\s+–)?\s*(.{10,200}?)(?:\n|$)",
-        r"^\s*(?:Error|Exception):\s*(.{10,200}?)$",
-        r"Traceback\s+\(most\s+recent\s+call\s+last\)",
+        r"(?:Error|Exception|Failed|FAILED)(?:\s+:|\s+–)?\s*[\n]?(.{10,200}?)",
     ]
     text_lower = text.lower()
     if any(indicator in text_lower for indicator in ["error:", "exception:", "failed:", "traceback"]):
@@ -135,6 +143,15 @@ def _check_error(text: str, errors: list) -> None:
             m = re.search(pattern, text, re.IGNORECASE | re.MULTILINE)
             if m:
                 err_text = m.group(0).strip()[:200]
+                # Clean up and validate
+                err_text = re.sub(r'\s+', ' ', err_text)  # collapse whitespace
+                # Skip if it looks like code/format string
+                if "{" in err_text or "}" in err_text:
+                    continue
+                if err_text.count(":") > 5:
+                    continue  # Probably a traceback dump
+                if len(err_text) < 15:
+                    continue
                 if err_text not in errors:
                     errors.append(err_text)
                 break
@@ -276,9 +293,41 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
         "railway": "Railway", "cloudflare": "Cloudflare",
     }
     text_lower = all_text.lower()
+    # Only accept stack hints from transcript if they appear in proper context
+    # (not in paths, package names, or as substrings of other words)
+    # For ambiguous keywords like "angular" (could be "angular momentum"),
+    # require the keyword to be followed by tech-related terms
+    tech_suffixes = [
+        " framework", " library", "js", "ts", "python", "java", "node",
+        " app", " project", " code", " api", " server", " client",
+        ".js", ".ts", ".py", "()", " component", " module",
+    ]
     for keyword, label in stack_keywords.items():
-        if keyword in text_lower:
-            context["stack_hints"].append(label)
+        if keyword not in text_lower:
+            continue
+        # Skip if it's clearly a JSON key (package.json style: "keyword":)
+        if re.search(r'''["']''' + re.escape(keyword) + r'''["']?\s*:''', text_lower):
+            continue
+        # Skip if it's in a URL/path (e.g., /node_modules/next/)
+        if f"/{keyword}/" in text_lower or f"/{keyword}" in text_lower:
+            continue
+        # For short keywords (< 6 chars), verify it's not a substring of another word
+        if len(keyword) < 6:
+            # Check word boundaries - keyword should be surrounded by space/punct
+            pattern = r'(?<![a-z])' + re.escape(keyword) + r'(?![a-z])'
+            if not re.search(pattern, text_lower):
+                continue
+            # Extra check for short tech words that appear in common English
+            # e.g., "java" in "javascript" - only accept if followed by tech suffix
+            if len(keyword) <= 4:
+                found_proper = False
+                for suffix in tech_suffixes:
+                    if keyword + suffix in text_lower:
+                        found_proper = True
+                        break
+                if not found_proper:
+                    continue
+        context["stack_hints"].append(label)
     context["stack_hints"] = list(dict.fromkeys(context["stack_hints"]))[:10]
 
     # ── Architecture decisions ──
@@ -291,7 +340,8 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
         content = msg["content"]
         for pattern in decision_patterns:
             for m in re.finditer(pattern, content, re.IGNORECASE):
-                decision = m.group(0).strip().rstrip(".")
+                # Use group(1) to get the captured decision text, not the full match
+                decision = m.group(1).strip().rstrip(".")
                 if len(decision) < 20:
                     continue
                 if "?(" in decision or "?)" in decision or ".{" in decision:
@@ -316,8 +366,13 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
     for msg in assistant_msgs:
         for pattern in gotcha_patterns:
             for m in re.finditer(pattern, msg, re.IGNORECASE):
-                gotcha = m.group(0).strip().rstrip(".")
-                if len(gotcha) > 15 and gotcha not in context["gotchas"]:
+                gotcha = m.group(1).strip().rstrip(".")  # group(1), not group(0)
+                # Filter out gotchas that look like code/tracebacks
+                if len(gotcha) < 10:
+                    continue
+                if any(c in gotcha for c in ['{', '}', 'sys.', 'file=', '", ', '"']):
+                    continue
+                if gotcha not in context["gotchas"]:
                     context["gotchas"].append(gotcha)
     context["gotchas"] = context["gotchas"][:5]
 
@@ -327,14 +382,38 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
             context["gotchas"].append(err)
 
     # ── Current state ──
-    # Build from what was worked on
+    # Build from what was worked on - skip lines that look like code
+    CODE_INDICATORS = [
+        '# ', '## ', 'import ', 'from ', 'export ', 'const ', 'let ', 'var ',
+        'function ', 'class ', 'def ', 'fn ', 'pub ', 'struct ', 'interface ',
+        'print(', 'console.', 'return ', 'if ', 'for ', 'while ', 'switch(',
+        '```', '<!-- ', '===', '---', '--- ', '/*', '*/', '//',
+        'npm ', 'git ', 'python', 'pip ', 'cargo ', 'go ', 'rustc ',
+        '/Users/', '/home/', 'C:\\', '~\'', '\"', "']",
+        # Skip lines that look like file content with line numbers
+        # e.g., "565 # Map section names to headers" or "   10 | code"
+    ]
+    # Regex to detect lines that look like "123 # comment" (file content with line numbers)
+    LINE_NUM_RE = re.compile(r'^\s*\d+\s+#')
+
     if user_msgs:
         topics = []
         for msg in user_msgs[-5:]:
             first_line = msg.strip().split("\n")[0][:150]
             clean_line = clean_html_comments(first_line).strip()
-            if len(clean_line) > 10:
-                topics.append(clean_line)
+            # Skip lines that look like code/paths/commands
+            if len(clean_line) < 15:
+                continue
+            if any(clean_line.startswith(ci) for ci in CODE_INDICATORS):
+                continue
+            # Skip lines that look like file content with line numbers
+            if LINE_NUM_RE.match(clean_line):
+                continue
+            # Skip lines that are mostly code-like characters
+            alpha_ratio = sum(c.isalpha() for c in clean_line) / max(len(clean_line), 1)
+            if alpha_ratio < 0.4:  # Less than 40% letters = likely code
+                continue
+            topics.append(clean_line)
         if topics:
             context["current_state"] = f"Last session worked on: {topics[0]}"
 
@@ -345,7 +424,7 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
     for msg in assistant_msgs:
         for pattern in summary_patterns:
             for m in re.finditer(pattern, msg, re.IGNORECASE):
-                task = m.group(0).strip().rstrip(".!")[:150]
+                task = m.group(1).strip().rstrip(".!")[:150]  # group(1) = captured text
                 if len(task) > 10 and task not in context["tasks_completed"]:
                     context["tasks_completed"].append(task)
     context["tasks_completed"] = context["tasks_completed"][:5]
@@ -370,12 +449,21 @@ def extract_git_changes(cwd: Path) -> dict:
         if diff_proc.returncode == 0 and diff_proc.stdout.strip():
             result["diff_summary"] = diff_proc.stdout.strip()
 
-            # Parse changed files
+            # Parse changed files - git diff --stat format:
+            # filename | XX ++++ ----
+            # First field is always the filename
             for line in diff_proc.stdout.strip().splitlines():
                 parts = line.split()
-                if len(parts) >= 2 and parts[0] not in ("files", "insertions", "deletions", "file"):
-                    if not parts[0].startswith("-"):
-                        result["changed_files"].append(parts[-1])
+                if len(parts) >= 1:
+                    file_path = parts[0]
+                    # Skip summary lines
+                    if file_path in ("files", "insertions", "deletions", "file", "files", "total"):
+                        continue
+                    # Skip if it contains path separators that don't look like files
+                    # (e.g., "++++++++++++++++++++++++++++++" would fail this)
+                    if "/" not in file_path and not file_path.endswith(".py") and not file_path.endswith(".md"):
+                        continue
+                    result["changed_files"].append(file_path)
 
         # Get new untracked files
         status_proc = subprocess.run(
@@ -553,16 +641,39 @@ tags: [claude-recall, context]
 
 
 def build_key_files_section(files_changed: set, all_files: list) -> str:
-    """Build the key files section from changed files and mentioned files."""
-    if not files_changed and not all_files:
-        return ""
+    """Build the key files section from changed files and mentioned files.
+
+    Filters out git diff artifacts, paths with only +-/ characters, etc.
+    """
+    # Filter files to exclude garbage
+    FILE_GARBAGE_RE = re.compile(r'^[\+\-\s|]+$|^\d+\s+\d+$')
+
+    def is_valid_file(f: str) -> bool:
+        if not f or len(f) < 3:
+            return False
+        if FILE_GARBAGE_RE.match(f):
+            return False
+        if all(c in '+- ' for c in f):
+            return False  # Git diff artifact
+        if f.count('/') == 0 and '.' not in f and len(f) > 20:
+            return False  # Probably a diff line, not a file
+        return True
+
     # Prioritize changed files
-    files = list(files_changed)
+    valid_files = []
+    seen = set()
+    for f in list(files_changed):
+        if is_valid_file(f) and f not in seen:
+            seen.add(f)
+            valid_files.append(f)
     for f in all_files:
-        if f not in files:
-            files.append(f)
-    files = files[:15]
-    return "\n".join(f"- `{f}`" for f in files)
+        if is_valid_file(f) and f not in seen:
+            seen.add(f)
+            valid_files.append(f)
+
+    if not valid_files:
+        return ""
+    return "\n".join(f"- `{f}`" for f in valid_files[:15])
 
 
 def update_context_md(project_dir: Path, slug: str, cwd: Path,
@@ -577,10 +688,8 @@ def update_context_md(project_dir: Path, slug: str, cwd: Path,
     git_changes = git_changes or {}
 
     # Build auto-content for each section
-    # Stack: combine filesystem detection (reliable) + transcript hints
-    stack_items = list(dict.fromkeys(
-        fs_stack.get("stack", []) + transcript_context.get("stack_hints", [])
-    ))
+    # Stack: use filesystem detection only (transcript hints are too noisy)
+    stack_items = fs_stack.get("stack", [])
     stack_str = " · ".join(stack_items) if stack_items else ""
 
     what_this_is = transcript_context.get("what_this_is", "")
