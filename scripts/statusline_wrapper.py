@@ -57,9 +57,9 @@ def get_recall_status() -> str:
             return ""
 
         if is_new:
-            return f"\x1b[2m☰ recall: {slug} (new)\x1b[0m"
+            return f"\x1b[2m☰ claude-recall: {slug} (new)\x1b[0m"
         else:
-            return f"\x1b[2m☰ recall: {sessions}s\x1b[0m"
+            return f"\x1b[2m☰ claude-recall: {sessions} sessions\x1b[0m"
     except Exception:
         return ""
 
