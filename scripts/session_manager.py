@@ -159,18 +159,38 @@ def build_session_note(
 ) -> str:
     """Build a session note for saving to Obsidian.
 
-    Args:
-        slug: project slug
-        cwd: project directory
-        session_id: Claude session ID
-        facts: dict from extract_facts() with first_prompt, turns, etc.
-        llm_summary: optional LLM-generated summary dict
+    Includes the full conversation log (all user prompts + assistant summaries),
+    file operations, LLM-generated summary, and next steps.
     """
     ts = datetime.now()
+
+    # --- Conversation log ---
+    all_prompts = facts.get("all_prompts", [])
+    all_responses = facts.get("all_responses", [])
+    file_ops = facts.get("file_ops_summary", [])
+
+    conversation_lines = []
+    for i, prompt in enumerate(all_prompts):
+        prompt_display = prompt[:200]
+        conversation_lines.append(f"{i+1}. **User:** {prompt_display}")
+        if i < len(all_responses) and all_responses[i]:
+            resp_display = all_responses[i][:150]
+            conversation_lines.append(f"   → *{resp_display}*")
+
+    conversation_section = ""
+    if conversation_lines:
+        conversation_section = (
+            "\n## Conversation\n\n"
+            + "\n".join(conversation_lines)
+            + "\n"
+        )
 
     # --- Summary ---
     if llm_summary and llm_summary.get("summary"):
         summary = llm_summary["summary"]
+    elif all_prompts:
+        # Fallback: join first 3 prompts as summary
+        summary = "Topics: " + " → ".join(p[:80] for p in all_prompts[:3])
     else:
         summary = f"Started with: {facts.get('first_prompt', '?')}"
 
@@ -181,23 +201,24 @@ def build_session_note(
             f"- `{f}` — {role}"
             for f, role in llm_summary["files_and_roles"].items()
         )
-        files_section = f"\n## Files touched\n\n{items}\n"
+        files_section = f"\n## Files Touched\n\n{items}\n"
+    elif file_ops:
+        items = "\n".join(f"- `{op}`" for op in file_ops[:15])
+        files_section = f"\n## Files Touched\n\n{items}\n"
     elif facts.get("files"):
-        # Normalize to relative paths
         files = _normalize_file_paths(facts["files"], cwd)
         items = "\n".join(f"- `{f}`" for f in files[:15])
-        files_section = f"\n## Files touched\n\n{items}\n"
+        files_section = f"\n## Files Touched\n\n{items}\n"
 
     # --- Next steps ---
     if llm_summary and llm_summary.get("next_steps"):
         raw_steps = llm_summary["next_steps"]
-        # Guard: LLM sometimes returns a string instead of a list
         if isinstance(raw_steps, str):
             raw_steps = [s.strip() for s in raw_steps.split(",") if s.strip()]
         steps = "\n".join(f"- [ ] {s}" for s in raw_steps[:5])
-        next_section = f"\n## Next steps\n\n{steps}\n"
+        next_section = f"\n## Next Steps\n\n{steps}\n"
     else:
-        next_section = "\n## Next steps\n\n- [ ] _(continue from where you left off)_\n"
+        next_section = "\n## Next Steps\n\n- [ ] _(continue from where you left off)_\n"
 
     # --- Keywords ---
     keywords_section = ""
@@ -218,9 +239,10 @@ def build_session_note(
         f"---\n\n"
         f"# Session {ts.strftime('%Y-%m-%d %H:%M')}\n\n"
         f"## Directory\n\n`{cwd}`\n\n"
-        f"## Started with\n\n> {facts.get('first_prompt', '?')}\n\n"
         f"## Stats\n\n{facts.get('turns', 0)} user turns · "
-        f"{facts.get('total_messages', 0)} total messages\n"
+        f"{facts.get('total_messages', 0)} total messages · "
+        f"{facts.get('tool_count', 0)} tool calls\n"
+        f"{conversation_section}"
         f"\n## Summary\n\n{summary}\n"
         f"{files_section}"
         f"{next_section}"

@@ -156,24 +156,51 @@ def _track_file_ops(tool_name: str, tool_input: dict, file_ops: list) -> None:
 # ── Fact extraction ──────────────────────────────────────────────────────────
 
 def extract_facts(transcript: dict, cwd: Path) -> dict:
-    """Extract session facts from parsed transcript data."""
+    """Extract session facts from parsed transcript data.
+
+    Returns all user prompts, assistant response summaries, file ops,
+    and tool call counts — giving full conversation visibility.
+    """
     messages = transcript["messages"]
     tool_calls = transcript["tool_calls"]
     file_ops = transcript["file_ops"]
 
     user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
+    asst_msgs = [m["content"] for m in messages if m.get("role") == "assistant"
+                 and isinstance(m.get("content"), str)]
+
+    # All user prompts (truncated to 300 chars each)
+    all_prompts = []
+    for msg in user_msgs:
+        cleaned = re.sub(r'<[^>]+>', '', msg).strip()  # strip XML tags
+        cleaned = cleaned.replace("\n", " ")[:300]
+        if cleaned:
+            all_prompts.append(cleaned)
+
+    # Assistant response summaries (first meaningful line, max 150 chars)
+    all_responses = []
+    for msg in asst_msgs:
+        lines = msg.strip().splitlines()
+        summary = ""
+        for line in lines[:5]:
+            line = line.strip()
+            if len(line) > 15 and not line.startswith("```") and not line.startswith("#"):
+                summary = line[:150]
+                break
+        all_responses.append(summary or lines[0][:150] if lines else "")
 
     # Files from tool operations (most reliable)
     files = []
+    file_ops_summary = []
     for op, path in file_ops:
         if op in ("read", "write", "edit") and path:
             files.append(path)
+            file_ops_summary.append(f"{path} ({op})")
+        elif op == "bash":
+            file_ops_summary.append(f"bash: {path[:80]}")
 
     # Supplement with regex from assistant messages
-    asst_text = " ".join(
-        m["content"] for m in messages
-        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
-    )
+    asst_text = " ".join(asst_msgs)
     file_re = re.compile(
         r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
         r'md|json|yaml|yml|toml|sh|html|css|scss)\b'
@@ -184,6 +211,9 @@ def extract_facts(transcript: dict, cwd: Path) -> dict:
 
     return {
         "first_prompt": (user_msgs[0][:300].replace("\n", " ") if user_msgs else "(no messages)"),
+        "all_prompts": all_prompts,
+        "all_responses": all_responses,
+        "file_ops_summary": file_ops_summary[:20],
         "turns": len(user_msgs),
         "total_messages": len(messages),
         "files": files,
@@ -343,17 +373,16 @@ def save_session() -> None:
     # Extract facts from the FULL transcript
     facts = extract_facts(transcript, cwd)
 
-    # LLM summary — only attempt if transcript has enough content (>= 4 messages)
-    # For very short sessions (1-2 turns), LLM tends to echo the example prompt
+    # LLM summary — only attempt if transcript has enough content (>= 2 messages)
     llm_data = None
-    if _HAS_LLM and ensure_model() and facts["total_messages"] >= 4:
+    if _HAS_LLM and ensure_model() and facts["total_messages"] >= 2:
         llm_data = _llm_summary(messages, facts=facts)
         if llm_data:
             _debug(f"LLM summary OK: {llm_data.get('summary', '')[:60]}")
         else:
             _debug("LLM summary returned None")
-    elif facts["total_messages"] < 4:
-        _debug(f"Skipping LLM summary — only {facts['total_messages']} messages (minimum 4)")
+    elif facts["total_messages"] < 2:
+        _debug(f"Skipping LLM summary — only {facts['total_messages']} messages (minimum 2)")
 
     # Generate context.md if it doesn't exist yet
     if is_context_empty_or_missing(project_dir):
@@ -387,6 +416,8 @@ def save_session() -> None:
         decisions=decisions if decisions else None,
         gotchas=gotchas if gotchas else None,
         key_files_update=key_files[:10] if key_files else None,
+        session_summary=current_state,
+        all_prompts=facts.get("all_prompts", []),
     )
 
     # Write session note — OVERWRITE same file for same session_id

@@ -16,6 +16,7 @@ returns None and save_context.py uses regex-based facts as fallback.
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -36,17 +37,17 @@ def _debug(msg: str) -> None:
 # Qwen 0.5B (490M params) has a strong tendency to copy/echo example text.
 # We CANNOT use few-shot examples — it will copy them verbatim.
 # Instead: feed the extracted facts directly and ask for a clean-up rewrite.
-_SYSTEM = "You summarize coding sessions. Respond ONLY as JSON."
+_SYSTEM = "You summarize coding sessions. Respond ONLY as JSON. ONLY describe what actually happened — never invent content."
 
-# This prompt feeds the pre-extracted facts directly.
-# The model's job is to rephrase them into readable prose — NOT generate new info.
-_PROMPT = """Session facts:
-- Task: {first_prompt}
-- Files changed: {files}
-- Message count: {turns}
-{context_line}
-Summarize this session as JSON:
-{{"summary": "<what was done in 1-2 sentences>", "next_steps": ["<what to do next>"], "keywords": ["<topic1>", "<topic2>"]}}"""
+# This prompt feeds the ACTUAL conversation messages.
+# The model's job is to summarize what was discussed — NOT invent new info.
+_PROMPT = """Conversation log:
+{conversation}
+
+Files changed: {files}
+
+Summarize ONLY what happened above as JSON:
+{{"summary": "<1-2 sentences of what actually happened>", "next_steps": ["<what to do next>"], "keywords": ["<topic1>", "<topic2>"]}}"""
 
 
 def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | None:
@@ -73,27 +74,32 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
         if facts is None:
             facts = _quick_extract(messages)
 
-        first_prompt = facts.get("first_prompt", "unknown task")[:200]
         files = facts.get("files", [])
-        files_str = ", ".join(files[:8]) if files else "unknown"
-        turns = facts.get("turns", 1)
+        files_str = ", ".join(files[:8]) if files else "none"
 
-        # Extract a brief excerpt from assistant messages for more context
-        asst_msgs = [m["content"] for m in messages if m.get("role") == "assistant" and isinstance(m.get("content"), str)]
-        context_line = ""
-        if asst_msgs:
-            # Get last assistant message, first line, cleaned
-            last_asst = asst_msgs[-1].strip().split("\n")[0][:150]
-            last_asst = last_asst.replace('"', "'")
-            if len(last_asst) > 20:
-                context_line = f"- Last response: {last_asst}"
+        # Build actual conversation log for the LLM
+        conv_lines = []
+        all_prompts = facts.get("all_prompts", [])
+        all_responses = facts.get("all_responses", [])
+        if all_prompts:
+            for i, prompt in enumerate(all_prompts[:6]):
+                conv_lines.append(f"User: {prompt[:150]}")
+                if i < len(all_responses) and all_responses[i]:
+                    conv_lines.append(f"Assistant: {all_responses[i][:100]}")
+        else:
+            # Fallback: extract from raw messages
+            for m in messages[:12]:
+                role = m.get('role', '')
+                content = m.get('content', '')
+                if isinstance(content, str) and content.strip():
+                    conv_lines.append(f"{role.title()}: {content[:150]}")
 
-        # Build the facts-first prompt
+        conversation = "\n".join(conv_lines) if conv_lines else "(empty session)"
+
+        # Build the conversation-aware prompt
         prompt = _PROMPT.format(
-            first_prompt=first_prompt,
+            conversation=conversation,
             files=files_str,
-            turns=turns,
-            context_line=context_line,
         )
 
         response = llm.create_chat_completion(
@@ -144,7 +150,7 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
             elif not isinstance(val, list):
                 result[key] = []
 
-        # Validate — reject prompt echoes
+        # Validate — reject prompt echoes and hallucinations
         summary = result.get("summary", "")
         if not isinstance(summary, str) or len(summary) < 10:
             _debug("Rejected: summary too short")
@@ -152,23 +158,38 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
 
         # Reject if it echoes the prompt template
         echo_patterns = [
-            "what was done in",             # from template placeholder
-            "what to do next",              # from template placeholder
-            "<topic",                       # from template placeholder
-            "respond only",                 # from system prompt
-            "session facts:",               # from prompt structure
-            "summarize this session",        # from prompt structure
+            "what was done in",
+            "what to do next",
+            "<topic",
+            "respond only",
+            "session facts:",
+            "summarize this session",
+            "conversation log:",
+            "1-2 sentences",
         ]
         summary_lower = summary.lower()
         if any(p in summary_lower for p in echo_patterns):
             _debug(f"Rejected: prompt echo detected in summary: {summary[:80]}")
             return None
 
+        # Anti-hallucination: check that key nouns in summary appear in the transcript
+        transcript_text = conversation.lower()
+        summary_words = [w for w in re.findall(r'\b[a-z]{4,}\b', summary_lower)
+                        if w not in {'with', 'from', 'that', 'this', 'they', 'were',
+                                    'have', 'been', 'what', 'when', 'where', 'which',
+                                    'about', 'their', 'would', 'could', 'should',
+                                    'session', 'user', 'asked', 'help', 'some',
+                                    'project', 'code', 'file', 'files', 'made',
+                                    'added', 'also', 'used', 'using', 'into'}]
+        if summary_words:
+            match_ratio = sum(1 for w in summary_words if w in transcript_text) / len(summary_words)
+            if match_ratio < 0.3:
+                _debug(f"Rejected: hallucination detected (match={match_ratio:.0%}): {summary[:80]}")
+                return None
+
         # Ensure required keys
         result.setdefault("next_steps", [])
         result.setdefault("keywords", [])
-
-        # Backward compatibility: add empty optional fields
         result.setdefault("decisions", [])
         result.setdefault("files_and_roles", {})
 

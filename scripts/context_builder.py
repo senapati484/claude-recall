@@ -412,10 +412,13 @@ def update_context_after_session(
     decisions: list[str] | None = None,
     gotchas: list[str] | None = None,
     key_files_update: list[str] | None = None,
+    session_summary: str | None = None,
+    all_prompts: list[str] | None = None,
 ) -> None:
     """Update context.md with learnings from a completed session.
 
     Only updates auto-marker sections. User content outside markers is preserved.
+    After marker updates, runs an LLM enrichment pass to extract decisions/gotchas.
     """
     context_md = project_dir / "context.md"
     if not context_md.exists():
@@ -466,10 +469,118 @@ def update_context_after_session(
     if env_parts:
         updated = merge_auto_section(updated, "environment", " | ".join(env_parts))
 
+    # LLM enrichment pass — extract decisions/gotchas from session content
+    if session_summary and all_prompts and len(all_prompts) >= 2:
+        enriched = _llm_enrich_context(updated, session_summary, all_prompts)
+        if enriched:
+            if enriched.get("decisions"):
+                existing_dec = _extract_auto_section(updated, "decisions")
+                merged_dec = _merge_list_items(existing_dec, enriched["decisions"])
+                if merged_dec:
+                    updated = merge_auto_section(updated, "decisions", merged_dec)
+            if enriched.get("gotchas"):
+                existing_got = _extract_auto_section(updated, "gotchas")
+                merged_got = _merge_list_items(existing_got, enriched["gotchas"])
+                if merged_got:
+                    updated = merge_auto_section(updated, "gotchas", merged_got)
+
     if updated != existing:
         context_md.write_text(updated, encoding="utf-8")
         _debug("context.md updated with session learnings")
 
+
+_ENRICH_SYSTEM = "You extract key learnings from coding sessions. Respond ONLY as JSON."
+
+_ENRICH_PROMPT = """Session summary: {summary}
+
+User discussed: {prompts}
+
+From this session, extract any:
+1. Architecture/design decisions made
+2. Important gotchas or warnings discovered
+
+Respond as JSON:
+{{"decisions": ["<decision1>", "<decision2>"], "gotchas": ["<gotcha1>"]}}
+
+If none found, respond: {{"decisions": [], "gotchas": []}}"""
+
+
+def _llm_enrich_context(
+    existing_context: str,
+    session_summary: str,
+    all_prompts: list[str],
+) -> dict | None:
+    """Ask the LLM to extract decisions and gotchas from the session.
+
+    Returns dict with 'decisions' and 'gotchas' lists, or None if failed.
+    """
+    try:
+        from utils import get_llm, get_model_path
+        if not get_model_path().exists():
+            return None
+
+        llm = get_llm()
+        if llm is None:
+            return None
+
+        prompts_str = " | ".join(p[:100] for p in all_prompts[:5])
+
+        prompt = _ENRICH_PROMPT.format(
+            summary=session_summary[:300],
+            prompts=prompts_str,
+        )
+
+        response = llm.create_chat_completion(
+            messages=[
+                {"role": "system", "content": _ENRICH_SYSTEM},
+                {"role": "user",   "content": prompt},
+            ],
+            max_tokens=200,
+            temperature=0.1,
+        )
+
+        choice = response["choices"][0]
+        msg = choice.get("message", choice)
+        raw = (msg.get("content") or "").strip() if isinstance(msg, dict) else str(msg).strip()
+
+        # Strip markdown fences
+        if raw.startswith("```"):
+            raw = raw.split("```")[1]
+            if raw.startswith("json"):
+                raw = raw[4:]
+            raw = raw.strip()
+
+        result = json.loads(raw)
+
+        # Validate structure
+        decisions = result.get("decisions", [])
+        gotchas = result.get("gotchas", [])
+
+        if not isinstance(decisions, list):
+            decisions = []
+        if not isinstance(gotchas, list):
+            gotchas = []
+
+        # Filter out prompt echoes and too-short items
+        clean_decisions = [d for d in decisions
+                         if isinstance(d, str) and len(d) > 10
+                         and "decision1" not in d.lower()
+                         and "<" not in d]
+        clean_gotchas = [g for g in gotchas
+                        if isinstance(g, str) and len(g) > 10
+                        and "gotcha1" not in g.lower()
+                        and "<" not in g]
+
+        if clean_decisions or clean_gotchas:
+            _debug(f"LLM enrichment: {len(clean_decisions)} decisions, {len(clean_gotchas)} gotchas")
+            return {"decisions": clean_decisions[:5], "gotchas": clean_gotchas[:5]}
+
+        _debug("LLM enrichment: nothing extracted")
+        return None
+
+    except Exception as e:
+        _debug(f"LLM enrich error: {e}")
+        return None
 
 def _extract_auto_section(text: str, section_name: str) -> str:
     """Extract content between auto markers for a section."""
