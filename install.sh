@@ -283,6 +283,7 @@ info "Registering hooks in $SETTINGS..."
 
 LOAD_CMD="python3 $INSTALL_DIR/scripts/load_context.py"
 SAVE_CMD="python3 $INSTALL_DIR/scripts/save_context.py"
+START_CMD="python3 $INSTALL_DIR/scripts/session_start.py"
 
 python3 - <<PYEOF
 import json, sys
@@ -291,6 +292,7 @@ from pathlib import Path
 path = Path("$SETTINGS")
 load_cmd = "$LOAD_CMD"
 save_cmd = "$SAVE_CMD"
+start_cmd = "$START_CMD"
 
 if path.exists():
     try:
@@ -312,13 +314,17 @@ def already(event):
                 return True
     return False
 
-for event, cmd in [("UserPromptSubmit", load_cmd), ("Stop", save_cmd)]:
+for event, cmd, timeout in [
+    ("SessionStart", start_cmd, 10),
+    ("UserPromptSubmit", load_cmd, 60),
+    ("Stop", save_cmd, 60),
+]:
     if already(event):
         print(f"  ✓ {event} — already registered")
     else:
         hooks.setdefault(event, []).append({
             "matcher": "",
-            "hooks": [{"type": "command", "command": cmd, "timeout": 60}]
+            "hooks": [{"type": "command", "command": cmd, "timeout": timeout}]
         })
         print(f"  ✓ {event} — registered")
 
