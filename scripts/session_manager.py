@@ -190,7 +190,11 @@ def build_session_note(
 
     # --- Next steps ---
     if llm_summary and llm_summary.get("next_steps"):
-        steps = "\n".join(f"- [ ] {s}" for s in llm_summary["next_steps"])
+        raw_steps = llm_summary["next_steps"]
+        # Guard: LLM sometimes returns a string instead of a list
+        if isinstance(raw_steps, str):
+            raw_steps = [s.strip() for s in raw_steps.split(",") if s.strip()]
+        steps = "\n".join(f"- [ ] {s}" for s in raw_steps[:5])
         next_section = f"\n## Next steps\n\n{steps}\n"
     else:
         next_section = "\n## Next steps\n\n- [ ] _(continue from where you left off)_\n"

@@ -135,6 +135,15 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
                 _debug(f"JSON parse failed, repair also failed")
                 return None
 
+        # Normalize: ensure next_steps and keywords are always lists
+        # (Qwen 0.5B sometimes returns them as strings)
+        for key in ("next_steps", "keywords"):
+            val = result.get(key)
+            if isinstance(val, str) and val.strip():
+                result[key] = [s.strip() for s in val.split(",") if s.strip()]
+            elif not isinstance(val, list):
+                result[key] = []
+
         # Validate — reject prompt echoes
         summary = result.get("summary", "")
         if not isinstance(summary, str) or len(summary) < 10:
@@ -215,7 +224,7 @@ def _repair_json(raw: str) -> dict | None:
 
     result = {"summary": summary, "next_steps": [], "keywords": []}
 
-    # Try to extract next_steps
+    # Try to extract next_steps (as array or string)
     steps_match = re.search(r'"next_steps"\s*:\s*\[([^\]]*)\]', raw)
     if steps_match:
         steps_raw = steps_match.group(1)
@@ -224,6 +233,13 @@ def _repair_json(raw: str) -> dict | None:
             for s in steps_raw.split(",")
             if s.strip().strip('"').strip("'")
         ]
+    else:
+        # Handle next_steps as a plain string
+        steps_str = re.search(r'"next_steps"\s*:\s*"([^"]+)"', raw)
+        if steps_str:
+            result["next_steps"] = [
+                s.strip() for s in steps_str.group(1).split(",") if s.strip()
+            ]
 
     # Try to extract keywords
     kw_match = re.search(r'"keywords"\s*:\s*\[([^\]]*)\]', raw)

@@ -55,10 +55,13 @@ if ! command -v python3 &>/dev/null; then
 fi
 ok "Python $(python3 --version 2>&1 | awk '{print $2}')"
 
-if ! command -v claude &>/dev/null; then
+if command -v claude &>/dev/null; then
+  ok "Claude Code $(claude --version 2>/dev/null | head -1 || echo 'found')"
+elif [ -d "$HOME/.claude" ]; then
+  ok "Claude Code detected (~/.claude exists)"
+else
   echo "  ✗ Claude Code not found. Install from https://claude.ai/code"; exit 1
 fi
-ok "Claude Code $(claude --version 2>/dev/null | head -1 || echo 'found')"
 
 # ── 2. Obsidian vault path ────────────────────────────────────────────────────
 echo ""
@@ -123,13 +126,17 @@ ok "Config written → $CONFIG"
 echo ""
 info "Downloading claude-recall..."
 
-if [ -f "./SKILL.md" ] && [ -d "./scripts" ]; then
-  info "Local repository detected. Installing directly from local files..."
+# Detect if we're running from the repo (works even with `bash /path/to/install.sh`)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ -f "$SCRIPT_DIR/SKILL.md" ] && [ -d "$SCRIPT_DIR/scripts" ]; then
+  info "Local repository detected at $SCRIPT_DIR"
+  info "Installing from local files (not from GitHub)..."
   rm -rf "$INSTALL_DIR"
   mkdir -p "$INSTALL_DIR"
-  cp -R ./* "$INSTALL_DIR/"
+  cp -R "$SCRIPT_DIR"/* "$INSTALL_DIR/"
   rm -rf "$INSTALL_DIR/.git" 2>/dev/null || true
-  ok "Copied → $INSTALL_DIR"
+  ok "Copied → $INSTALL_DIR (local)"
 elif command -v git &>/dev/null; then
   if [ -d "$INSTALL_DIR/.git" ]; then
     info "Updating existing install via git pull..."
@@ -142,7 +149,7 @@ elif command -v git &>/dev/null; then
   else
     git clone --depth 1 --quiet "$REPO_URL" "$INSTALL_DIR"
   fi
-  ok "Cloned → $INSTALL_DIR"
+  ok "Cloned → $INSTALL_DIR (GitHub)"
 else
   # curl fallback
   mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/references"
@@ -165,7 +172,21 @@ else
     mkdir -p "$(dirname "$DEST")"
     curl -fsSL "$RAW_URL/$FILE" -o "$DEST"
   done
-  ok "Downloaded → $INSTALL_DIR"
+  ok "Downloaded → $INSTALL_DIR (curl)"
+fi
+
+# Verify all scripts compile
+COMPILE_ERRORS=0
+for pyfile in "$INSTALL_DIR"/scripts/*.py; do
+  if ! python3 -m py_compile "$pyfile" 2>/dev/null; then
+    warn "Compile error: $(basename "$pyfile")"
+    COMPILE_ERRORS=$((COMPILE_ERRORS + 1))
+  fi
+done
+if [ "$COMPILE_ERRORS" -eq 0 ]; then
+  ok "All scripts compile OK"
+else
+  warn "$COMPILE_ERRORS scripts failed to compile"
 fi
 
 chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
