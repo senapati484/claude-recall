@@ -149,8 +149,15 @@ def load_context() -> None:
         _debug(f"Returning {len(body)} chars of context")
 
         # Print to stdout — Claude reads this as system context
+        status_line = (
+            f"[claude-recall] 🧠 Loaded memory for '{slug}' "
+            f"({session_count} past sessions, {len(body)} chars)"
+        )
         print(
-            "<!-- claude-recall: project memory loaded -->\n"
+            f"<!-- claude-recall: project memory loaded -->\n"
+            f"**IMPORTANT: Start your FIRST response with this exact line "
+            f"on its own, then a blank line, then your normal answer:**\n"
+            f"`{status_line}`\n\n"
             f"{' | '.join(header_parts)}\n\n"
             + body
             + "\n\n> **claude-recall active** — context auto-saves when you stop.\n"
