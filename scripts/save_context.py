@@ -2,14 +2,21 @@
 """
 save_context.py — claude-recall Stop hook.
 
-Fires when the Claude Code session ends. Reads the session transcript,
-extracts key facts, and:
-1. Writes a structured session note to Obsidian
-2. Updates context.md with session learnings
-3. Updates _index.md project index
+CRITICAL DESIGN NOTE:
+The `Stop` hook fires after EVERY assistant response turn, NOT just when
+the user closes the terminal. This means for a session with 5 user prompts,
+this script runs 5+ times.
 
-Never exits non-zero.
+Our strategy:
+- Use session_id to write to ONE session note (overwrite on each turn)
+- The note filename is based on session_id, not timestamp
+- Each call reads the FULL growing transcript, so later calls have more data
+- LLM summary only runs when the transcript has enough content (>= 3 messages)
+
+Never exits non-zero — a failed hook would block Claude.
 """
+
+from __future__ import annotations
 
 import json
 import re
@@ -53,7 +60,12 @@ def _debug(msg: str) -> None:
 # ── Transcript parsing ────────────────────────────────────────────────────────
 
 def parse_transcript(path: str) -> dict:
-    """Parse transcript JSONL and extract structured data."""
+    """Parse transcript JSONL and extract structured data.
+
+    Handles Claude Code's real transcript format where each line has:
+    - type: "user", "assistant", "system", "permission-mode", etc.
+    - message: {role, content} (only for user/assistant types)
+    """
     result = {
         "messages": [], "tool_calls": [], "errors": [], "file_ops": [],
     }
@@ -69,6 +81,9 @@ def parse_transcript(path: str) -> dict:
                 try:
                     obj = json.loads(line)
                     msg = obj.get("message", {})
+                    if not isinstance(msg, dict):
+                        continue
+
                     role = msg.get("role")
                     content = msg.get("content")
 
@@ -104,6 +119,7 @@ def parse_transcript(path: str) -> dict:
                 except json.JSONDecodeError:
                     continue
     except Exception as exc:
+        _debug(f"Transcript read error: {exc}")
         print(f"[claude-recall] Transcript read error: {exc}", file=sys.stderr)
 
     return result
@@ -145,13 +161,16 @@ def extract_facts(transcript: dict, cwd: Path) -> dict:
         if op in ("read", "write", "edit") and path:
             files.append(path)
 
-    # Supplement with regex
-    all_text = " ".join(m["content"] for m in messages if isinstance(m.get("content"), str))
+    # Supplement with regex from assistant messages
+    asst_text = " ".join(
+        m["content"] for m in messages
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+    )
     file_re = re.compile(
         r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
         r'md|json|yaml|yml|toml|sh|html|css|scss)\b'
     )
-    raw_files = list(dict.fromkeys(m.group() for m in file_re.finditer(all_text)))
+    raw_files = list(dict.fromkeys(m.group() for m in file_re.finditer(asst_text)))
     files = list(dict.fromkeys(files + raw_files))
     files = filter_file_paths(files, cwd)
 
@@ -167,24 +186,29 @@ def extract_facts(transcript: dict, cwd: Path) -> dict:
 def extract_current_state(transcript: dict) -> str:
     """Extract what the user was working on (for context.md current_state).
 
-    Uses the FIRST user message (what they asked), not tool outputs.
+    Uses the LAST user message (most recent work).
     """
     user_msgs = [m["content"] for m in transcript["messages"] if m.get("role") == "user"]
     if not user_msgs:
         return ""
 
-    first_prompt = user_msgs[0].strip().split("\n")[0][:150]
+    # Use the last user message for the most recent context
+    last_prompt = user_msgs[-1].strip().split("\n")[0][:150]
 
-    # Clean up HTML/command fragments
-    first_prompt = re.sub(r'<[^>]+>', '', first_prompt).strip()
-    if len(first_prompt) < 10:
-        return ""
+    # Clean up
+    last_prompt = re.sub(r'<[^>]+>', '', last_prompt).strip()
+    if len(last_prompt) < 10:
+        # Fall back to first
+        last_prompt = user_msgs[0].strip().split("\n")[0][:150]
+        last_prompt = re.sub(r'<[^>]+>', '', last_prompt).strip()
+        if len(last_prompt) < 10:
+            return ""
 
     # Skip if it looks like a path or command
-    if first_prompt.startswith("/") or first_prompt.startswith("cd "):
+    if last_prompt.startswith("/") or last_prompt.startswith("cd "):
         return ""
 
-    return f"Last session: {first_prompt}"
+    return f"Working on: {last_prompt}"
 
 
 def extract_decisions(transcript: dict) -> list[str]:
@@ -223,6 +247,19 @@ def extract_gotchas(transcript: dict) -> list[str]:
                         gotchas.append(gotcha)
 
     return list(dict.fromkeys(gotchas))[:5]
+
+
+# ── Session note path ─────────────────────────────────────────────────────────
+
+def _session_note_path(sessions_dir: Path, session_id: str) -> Path:
+    """Get session note path — uses session_id so the same session always
+    overwrites the same file (critical because Stop fires per-turn).
+
+    The filename is: <date>_<short-id>.md
+    """
+    date_str = datetime.now().strftime("%Y-%m-%d")
+    short_id = session_id[:8] if session_id else "unknown"
+    return sessions_dir / f"{date_str}_{short_id}.md"
 
 
 # ── Index update ──────────────────────────────────────────────────────────────
@@ -266,7 +303,7 @@ def save_session() -> None:
     cwd             = get_cwd(hook_input)
     cfg             = load_config()
 
-    _debug(f"session_id={session_id}, transcript={transcript_path}, cwd={cwd}")
+    _debug(f"session_id={session_id}, cwd={cwd}")
 
     cleanup_stale_markers()
 
@@ -274,7 +311,7 @@ def save_session() -> None:
         _debug("save_sessions disabled")
         return
 
-    # Parse transcript
+    # Parse the FULL transcript (it grows with each turn)
     transcript = parse_transcript(transcript_path) if transcript_path else {
         "messages": [], "tool_calls": [], "errors": [], "file_ops": []
     }
@@ -295,28 +332,32 @@ def save_session() -> None:
         print(f"[claude-recall] Cannot write to vault: {project_dir}", file=sys.stderr)
         return
 
-    # Extract facts
+    # Extract facts from the FULL transcript
     facts = extract_facts(transcript, cwd)
 
-    # LLM summary (if available)
+    # LLM summary — only attempt if transcript has enough content (>= 4 messages)
+    # For very short sessions (1-2 turns), LLM tends to echo the example prompt
     llm_data = None
-    if _HAS_LLM and ensure_model():
+    if _HAS_LLM and ensure_model() and facts["total_messages"] >= 4:
         llm_data = _llm_summary(messages, facts=facts)
         if llm_data:
             _debug(f"LLM summary OK: {llm_data.get('summary', '')[:60]}")
         else:
             _debug("LLM summary returned None")
+    elif facts["total_messages"] < 4:
+        _debug(f"Skipping LLM summary — only {facts['total_messages']} messages (minimum 4)")
 
     # Generate context.md if it doesn't exist yet
     if is_context_empty_or_missing(project_dir):
         try:
+            print(f"[claude-recall] Generating context for '{slug}'...", file=sys.stderr)
             content = build_compact_context(cwd, slug)
             (project_dir / "context.md").write_text(content, encoding="utf-8")
             _debug("Created initial context.md")
         except Exception as e:
             _debug(f"Failed to create context.md: {e}")
 
-    # Update context.md with session learnings
+    # Build current_state from LLM or regex
     current_state = ""
     if llm_data and llm_data.get("summary"):
         current_state = f"Last session: {llm_data['summary'][:200]}"
@@ -329,6 +370,7 @@ def save_session() -> None:
     # Normalize file paths for key_files update
     key_files = filter_file_paths(facts.get("files", []), cwd)
 
+    # Update context.md with session learnings
     update_context_after_session(
         project_dir=project_dir,
         slug=slug,
@@ -339,11 +381,13 @@ def save_session() -> None:
         key_files_update=key_files[:10] if key_files else None,
     )
 
-    # Write session note
+    # Write session note — OVERWRITE same file for same session_id
+    # This is critical because Stop fires after EVERY turn, not just at exit.
+    # Each call gets the FULL growing transcript, so later calls have more data.
     note = build_session_note(slug, cwd, session_id, facts, llm_data)
-    note_path = project_dir / "sessions" / f"{now_str()}.md"
+    note_path = _session_note_path(project_dir / "sessions", session_id)
 
-    _debug(f"Writing note to: {note_path}")
+    _debug(f"Writing note to: {note_path} (overwrite={note_path.exists()})")
     try:
         note_path.write_text(note, encoding="utf-8")
         _debug("Note written successfully")
@@ -352,14 +396,23 @@ def save_session() -> None:
         print(f"[claude-recall] Cannot write session note: {note_path}", file=sys.stderr)
         return
 
-    # Update vault index
-    update_index(vault_root, slug, cwd, facts["turns"])
+    # Update vault index — only on first save for this session
+    # (Avoid inflating session count on every turn)
+    index_marker = project_dir / "sessions" / f".{session_id[:8]}_indexed"
+    if not index_marker.exists():
+        update_index(vault_root, slug, cwd, facts["turns"])
+        try:
+            index_marker.write_text(now_str(), encoding="utf-8")
+        except Exception:
+            pass
+    else:
+        _debug("Skipping index update — already indexed for this session")
 
-    # Clean up session marker
-    clear_session_marker(session_id, cwd)
+    # Don't clear the session marker here — the session is still active!
+    # The marker will be cleaned up by stale marker cleanup on next load.
 
-    _debug(f"=== SAVED: {note_path} ===")
-    print(f"[claude-recall] Saved to Obsidian → {note_path}", file=sys.stderr)
+    _debug(f"=== SAVED: {note_path} (turns={facts['turns']}, msgs={facts['total_messages']}) ===")
+    print(f"[claude-recall] Session saved → {slug} ({facts['turns']} turns)", file=sys.stderr)
 
 
 if __name__ == "__main__":

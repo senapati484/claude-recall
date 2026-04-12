@@ -11,6 +11,8 @@ Subsequent prompts in the same session are skipped (marker file).
 Never exits non-zero — a failed hook would block Claude from starting.
 """
 
+from __future__ import annotations
+
 import json
 import sys
 import traceback
@@ -74,14 +76,14 @@ def load_context() -> None:
         if is_context_empty_or_missing(project_dir):
             try:
                 project_dir.mkdir(parents=True, exist_ok=True)
-                print(f"[claude-recall] Generating context for '{slug}'...", file=sys.stderr)
+                print(f"[claude-recall] ⚡ Generating context for '{slug}'...", file=sys.stderr)
                 content = build_compact_context(cwd, slug)
                 context_md.write_text(content, encoding="utf-8")
                 _debug(f"Auto-generated context.md ({len(content)} chars)")
-                print(f"[claude-recall] Context generated.", file=sys.stderr)
+                print(f"[claude-recall] ✓ Context generated ({len(content)} chars)", file=sys.stderr)
             except Exception as exc:
                 _debug(f"Auto-generate failed: {exc}")
-                print(f"[claude-recall] Auto-generate error: {exc}", file=sys.stderr)
+                print(f"[claude-recall] ✗ Auto-generate error: {exc}", file=sys.stderr)
 
         # Build output for Claude
         parts: list[str] = []
@@ -127,7 +129,10 @@ def load_context() -> None:
 
         # Header
         sessions_dir = project_dir / "sessions"
-        session_count = len(list(sessions_dir.glob("*.md"))) if sessions_dir.exists() else 0
+        session_count = len([
+            f for f in sessions_dir.glob("*.md")
+            if not f.name.startswith(".")
+        ]) if sessions_dir.exists() else 0
         header_parts = [f"Project: `{slug}`", f"Dir: `{cwd}`"]
         if session_count > 0:
             header_parts.append(f"Sessions: {session_count}")
@@ -135,16 +140,24 @@ def load_context() -> None:
 
         _debug(f"Returning {len(body)} chars of context")
 
+        # Print to stdout — Claude reads this as system context
         print(
-            "<!-- claude-recall: context loaded from Obsidian -->\n"
+            "<!-- claude-recall: project memory loaded -->\n"
             f"{' | '.join(header_parts)}\n\n"
             + body
-            + "\n\n> **claude-recall**: Run `python3 ~/.claude/skills/claude-recall/scripts/recall_update.py update` to refresh context\n"
+            + "\n\n> **claude-recall active** — context auto-saves when you stop.\n"
+        )
+
+        # User-visible feedback on stderr
+        print(
+            f"[claude-recall] ✓ Loaded context for '{slug}' "
+            f"({len(body)} chars, {session_count} past sessions)",
+            file=sys.stderr,
         )
 
     except Exception as exc:
         _debug(f"ERROR: {exc}\n{traceback.format_exc()}")
-        print(f"[claude-recall] load error: {exc}", file=sys.stderr)
+        print(f"[claude-recall] ✗ load error: {exc}", file=sys.stderr)
         sys.exit(0)
 
 

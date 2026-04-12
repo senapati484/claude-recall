@@ -32,20 +32,21 @@ def _debug(msg: str) -> None:
         pass
 
 
-# Completion-style prompt for 0.5B model.
-# CRITICAL: Do NOT put placeholder text in the JSON template — Qwen 0.5B copies it.
-# Instead, give a concrete example in a different domain, then ask for the actual data.
-_SYSTEM = "You are a developer writing session notes. Respond with valid JSON only."
+# PROMPT DESIGN NOTE:
+# Qwen 0.5B (490M params) has a strong tendency to copy/echo example text.
+# We CANNOT use few-shot examples — it will copy them verbatim.
+# Instead: feed the extracted facts directly and ask for a clean-up rewrite.
+_SYSTEM = "You summarize coding sessions. Respond ONLY as JSON."
 
-_PROMPT = """Example session:
-User asked: "Add login page with OAuth"
-Files: auth.py, login.html
-Result: {{"summary": "Added OAuth login page with Google provider. Created auth.py for token handling and login.html for the UI.", "next_steps": ["Add logout button", "Test refresh tokens"], "keywords": ["auth", "oauth", "login"]}}
-
-Actual session:
-User asked: "{first_prompt}"
-Files: {files}
-Result: """
+# This prompt feeds the pre-extracted facts directly.
+# The model's job is to rephrase them into readable prose — NOT generate new info.
+_PROMPT = """Session facts:
+- Task: {first_prompt}
+- Files changed: {files}
+- Message count: {turns}
+{context_line}
+Summarize this session as JSON:
+{{"summary": "<what was done in 1-2 sentences>", "next_steps": ["<what to do next>"], "keywords": ["<topic1>", "<topic2>"]}}"""
 
 
 def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | None:
@@ -75,11 +76,24 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
         first_prompt = facts.get("first_prompt", "unknown task")[:200]
         files = facts.get("files", [])
         files_str = ", ".join(files[:8]) if files else "unknown"
+        turns = facts.get("turns", 1)
 
-        # Build the completion-style prompt
+        # Extract a brief excerpt from assistant messages for more context
+        asst_msgs = [m["content"] for m in messages if m.get("role") == "assistant" and isinstance(m.get("content"), str)]
+        context_line = ""
+        if asst_msgs:
+            # Get last assistant message, first line, cleaned
+            last_asst = asst_msgs[-1].strip().split("\n")[0][:150]
+            last_asst = last_asst.replace('"', "'")
+            if len(last_asst) > 20:
+                context_line = f"- Last response: {last_asst}"
+
+        # Build the facts-first prompt
         prompt = _PROMPT.format(
             first_prompt=first_prompt,
             files=files_str,
+            turns=turns,
+            context_line=context_line,
         )
 
         response = llm.create_chat_completion(
@@ -127,13 +141,17 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
             _debug("Rejected: summary too short")
             return None
 
-        # Reject if it echoes the prompt template or the example
+        # Reject if it echoes the prompt template
         echo_patterns = [
-            "sentence description", "what was built", "respond only",
-            "added oauth login page with google",  # from example
-            "created auth.py for token handling",   # from example
+            "what was done in",             # from template placeholder
+            "what to do next",              # from template placeholder
+            "<topic",                       # from template placeholder
+            "respond only",                 # from system prompt
+            "session facts:",               # from prompt structure
+            "summarize this session",        # from prompt structure
         ]
-        if any(p in summary.lower() for p in echo_patterns):
+        summary_lower = summary.lower()
+        if any(p in summary_lower for p in echo_patterns):
             _debug(f"Rejected: prompt echo detected in summary: {summary[:80]}")
             return None
 
