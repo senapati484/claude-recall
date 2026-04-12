@@ -36,82 +36,24 @@ def debug_log(msg: str) -> None:
         pass
 
 
-def notify_terminal(msg: str) -> None:
-    """Write a message directly to the user's terminal.
+def write_status_cache(slug: str, session_count: int, is_new: bool = False) -> None:
+    """Write recall status to a cache file that the statusLine wrapper reads.
 
-    Claude Code captures stdout (as system context) and may not display stderr.
-    This function walks the process ancestor chain to find a TTY device,
-    then writes directly to it. Falls back to finding Claude's TTY by process name.
+    The statusLine is Claude Code's built-in status bar. Our wrapper script
+    reads this cache and appends recall info to the bar.
     """
     try:
-        import subprocess
-
-        def _get_tty(pid: str) -> str:
-            """Get TTY for a PID, return empty string if none."""
-            try:
-                r = subprocess.run(
-                    ["ps", "-o", "tty=", "-p", pid],
-                    capture_output=True, text=True, timeout=2
-                )
-                t = r.stdout.strip()
-                return t if t and t != "??" else ""
-            except Exception:
-                return ""
-
-        def _get_ppid(pid: str) -> str:
-            """Get parent PID for a PID."""
-            try:
-                r = subprocess.run(
-                    ["ps", "-o", "ppid=", "-p", pid],
-                    capture_output=True, text=True, timeout=2
-                )
-                return r.stdout.strip()
-            except Exception:
-                return ""
-
-        tty_name = ""
-
-        # Strategy 1: Walk ancestor chain up to 10 levels
-        current_pid = str(os.getpid())
-        for _ in range(10):
-            parent = _get_ppid(current_pid)
-            if not parent or parent == "0" or parent == "1":
-                break
-            tty_name = _get_tty(parent)
-            if tty_name:
-                break
-            current_pid = parent
-
-        # Strategy 2: Find Claude process directly by name
-        if not tty_name:
-            try:
-                r = subprocess.run(
-                    ["pgrep", "-f", "claude"],
-                    capture_output=True, text=True, timeout=2
-                )
-                for pid in r.stdout.strip().splitlines():
-                    pid = pid.strip()
-                    if pid:
-                        tty_name = _get_tty(pid)
-                        if tty_name:
-                            break
-            except Exception:
-                pass
-
-        if tty_name:
-            tty_path = f"/dev/{tty_name}"
-            if os.path.exists(tty_path):
-                fd = os.open(tty_path, os.O_WRONLY | os.O_NOCTTY)
-                # \033[2m = dim, \033[36m = cyan, \033[0m = reset
-                # Leading \r\n ensures we start on a fresh line
-                os.write(fd, f"\r\n\033[2m\033[36m  {msg}\033[0m\r\n".encode())
-                os.close(fd)
-                debug_log(f"notify_terminal: wrote to {tty_path}")
-                return
-
-        debug_log(f"notify_terminal: no usable TTY found")
+        import json as _json
+        cache_path = Path("/tmp/claude-recall-status.json")
+        cache_path.write_text(_json.dumps({
+            "slug": slug,
+            "sessions": session_count,
+            "is_new": is_new,
+            "ts": datetime.now().isoformat(),
+        }))
+        debug_log(f"write_status_cache: wrote {cache_path}")
     except Exception as e:
-        debug_log(f"notify_terminal: error: {e}")
+        debug_log(f"write_status_cache: error: {e}")
 
 
 DEFAULT_CONFIG = {

@@ -333,6 +333,42 @@ path.write_text(json.dumps(settings, indent=2))
 print(f"  ✓ Saved {path}")
 PYEOF
 
+# ── 7b. Register statusLine wrapper ──────────────────────────────────────────
+STATUSLINE_CMD="python3 $INSTALL_DIR/scripts/statusline_wrapper.py"
+UPSTREAM_FILE="$HOME/.claude/claude-recall-upstream-statusline.txt"
+
+python3 - <<PYEOF
+import json
+from pathlib import Path
+
+settings_path = Path("$SETTINGS")
+upstream_path = Path("$UPSTREAM_FILE")
+wrapper_cmd = "$STATUSLINE_CMD"
+
+settings = json.loads(settings_path.read_text())
+
+current_sl = settings.get("statusLine", {})
+current_cmd = ""
+if isinstance(current_sl, dict):
+    current_cmd = current_sl.get("command", "")
+elif isinstance(current_sl, str):
+    current_cmd = current_sl
+
+# Save the upstream command (if it's not already our wrapper)
+if current_cmd and "claude-recall" not in current_cmd:
+    upstream_path.write_text(current_cmd)
+    print(f"  ✓ Saved upstream statusLine → {upstream_path}")
+elif not upstream_path.exists():
+    upstream_path.write_text("")
+
+# Set our wrapper as the statusLine
+settings["statusLine"] = {
+    "type": "command",
+    "command": wrapper_cmd,
+}
+settings_path.write_text(json.dumps(settings, indent=2))
+print(f"  ✓ statusLine → claude-recall wrapper")
+PYEOF
 # ── 8. Create vault folder skeleton ──────────────────────────────────────────
 VAULT_CR="$VAULT_PATH/claude-recall"
 mkdir -p "$VAULT_CR/projects"

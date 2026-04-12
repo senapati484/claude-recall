@@ -3,7 +3,8 @@
 session_start.py — claude-recall SessionStart hook.
 
 Fires when Claude Code starts a session.
-Writes a notification directly to the user's terminal via /dev/ttyXXX.
+Writes status cache for the statusLine wrapper to display.
+stdout → Claude's system context (invisible to user, visible to Claude).
 """
 import sys
 import os
@@ -22,7 +23,7 @@ try:
     sys.path.insert(0, str(Path(__file__).parent))
     from utils import (
         load_config, get_cwd, cwd_to_slug, read_hook_input,
-        get_project_dir, notify_terminal,
+        get_project_dir, write_status_cache,
     )
 
     hook_input = read_hook_input()
@@ -34,13 +35,10 @@ try:
     sessions_dir = project_dir / "sessions"
     session_count = len(list(sessions_dir.glob("*.md"))) if sessions_dir.exists() else 0
 
-    # Write directly to the user's terminal (bypasses Claude Code capture)
-    if context_md.exists():
-        notify_terminal(f"☰ recall: {slug} · {session_count} sessions")
-    else:
-        notify_terminal(f"☰ recall: new project '{slug}'")
+    # Write status cache for the statusLine wrapper
+    write_status_cache(slug, session_count, is_new=not context_md.exists())
 
-    # Also print to stdout for Claude's context
+    # Print to stdout for Claude's context
     print(f"[claude-recall] Project memory active for '{slug}'.")
 
     try:
