@@ -238,8 +238,10 @@ def extract_facts(transcript: dict) -> dict:
 
 
 def clean_html_comments(text: str) -> str:
-    """Remove HTML comments and control markers from text."""
-    return re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    """Remove HTML comments, Claude Code internal tags, and control markers."""
+    text = re.sub(r'<command-\w+>.*?</command-\w+>', '', text, flags=re.DOTALL)
+    text = re.sub(r'<!--.*?-->', '', text, flags=re.DOTALL)
+    return text
 
 def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
     """Analyze transcript to extract rich project context.
@@ -282,6 +284,13 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
 
     # ── What this is ──
     # Try to extract from early assistant messages (Claude usually describes the project)
+    # SKIP session summary patterns that come from save_context's own session notes
+    SESSION_SUMMARY_PATTERNS = [
+        r"^The session starts? (?:with|by) ",
+        r"^Started with: ",
+        r"^Check(ing)? the (?:codebase|project)",
+        r"^Fix(ing)? (?:the )?(?:context|llm|skill)",
+    ]
     for msg in assistant_msgs[:5]:
         # Look for project description patterns
         desc_patterns = [
@@ -292,7 +301,11 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
         for pattern in desc_patterns:
             m = re.search(pattern, msg, re.IGNORECASE)
             if m:
-                context["what_this_is"] = m.group(0).strip().rstrip(".")
+                candidate = m.group(0).strip().rstrip(".")
+                # Skip if it looks like a session summary, not a project description
+                if any(re.match(p, candidate, re.IGNORECASE) for p in SESSION_SUMMARY_PATTERNS):
+                    continue
+                context["what_this_is"] = candidate
                 break
         if context["what_this_is"]:
             break
@@ -396,6 +409,17 @@ def extract_context_from_transcript(transcript: dict, cwd: Path) -> dict:
                 # Must have reasonable alpha ratio (not mostly symbols/numbers)
                 alpha_ratio = sum(c.isalpha() for c in gotcha) / max(len(gotcha), 1)
                 if alpha_ratio < 0.5:
+                    continue
+                # Skip debugging explanation fragments (these look like "X is caused by Y" not real gotchas)
+                skip_prefixes = [
+                    "be in how", "the source", "the reason", "this happens because",
+                    "the issue is that", "the problem is", "in response parsing",
+                    "how `recall", "the `recall", "be to check", "the installed",
+                ]
+                if any(gotcha.lower().startswith(p) for p in skip_prefixes):
+                    continue
+                # Skip fragments containing inline code (backtick strings)
+                if '`' in gotcha:
                     continue
                 if gotcha not in context["gotchas"]:
                     context["gotchas"].append(gotcha)
@@ -720,11 +744,29 @@ def update_context_md(project_dir: Path, slug: str, cwd: Path,
     stack_items = fs_stack.get("stack", [])
     stack_str = " · ".join(stack_items) if stack_items else ""
 
-    # Use LLM summary for what_this_is if available
-    if llm_data and llm_data.get("summary"):
-        what_this_is = llm_data["summary"].replace("\n", " ")[:200]
+    # what_this_is: ONLY update from transcript if it's a genuine project description.
+    # Never overwrite with session summaries (e.g., "The session starts with...").
+    # Priority: LLM session summary → existing context.md value → transcript pattern match.
+    raw_what = transcript_context.get("what_this_is", "")
+    llm_summary = llm_data.get("summary", "") if llm_data else ""
+    # Only use transcript what_this_is if it looks like a real project description
+    if raw_what and len(raw_what) > 20 and not any(
+        raw_what.lower().startswith(p) for p in [
+            "the session", "started with", "check", "fix", "update",
+            "the context", "this project", "this skill"
+        ]
+    ):
+        what_this_is = raw_what
+    elif llm_summary and len(llm_summary) > 20 and not any(
+        llm_summary.lower().startswith(p) for p in [
+            "the session", "started with", "check", "fix", "update",
+            "the context", "this project", "this skill"
+        ]
+    ):
+        what_this_is = llm_summary.replace("\n", " ")[:200]
     else:
-        what_this_is = transcript_context.get("what_this_is", "")
+        # Keep existing value from context.md — don't overwrite with noise
+        what_this_is = ""
 
     current_state = transcript_context.get("current_state", "")
 

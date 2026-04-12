@@ -56,9 +56,11 @@ _CONTEXT_SYSTEM = (
 _CONTEXT_USER_TEMPLATE = """Analyze this project and produce a JSON summary.
 
 Project directory: {cwd}
-Top-level directories: {dirs}
-Config files detected: {config_files}
+Top-level entries: {dirs}
 README excerpt: {readme}
+Config files (CRITICAL — use these to detect the real stack): {config_files}
+Detected stack from filesystem: {stack}
+Git commits: {git_commits}
 
 Output exactly this JSON — fill every field:
 {{
@@ -70,11 +72,14 @@ Output exactly this JSON — fill every field:
 }}
 
 Rules:
-- be accurate and concise
-- stack: list the main technologies/frameworks/libraries (max 8)
+- Use config_files to determine the REAL stack — do NOT guess from directory names
+- For Flutter/Dart projects: stack must include "Flutter" and "Dart", NOT just "Python"
+- pubspec.yaml = Flutter, requirements.txt = Python, package.json = Node.js
+- stack: list actual technologies from config files (max 8)
 - key_directories: max 5 most important directories
 - entry_point: the main file or command to run the project
-- If README is empty, infer from directory structure and file names
+- description: what THIS specific project does (not a generic template description)
+- If README is a generic template, infer from config files and git commits
 """
 
 
@@ -119,12 +124,26 @@ def _generate_context_with_llm(cwd: Path, slug: str) -> str | None:
         dirs_str = ", ".join(dirs)
         readme = _get_readme_content(cwd)
         config_str = ", ".join(fs.get("config_files", [])) or "none"
+        stack_str = " · ".join(fs.get("stack", [])) or "not detected"
+        git_commits = ""
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-5"],
+                cwd=str(cwd), capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                git_commits = result.stdout.strip()
+        except Exception:
+            pass
 
         user_msg = _CONTEXT_USER_TEMPLATE.format(
             cwd=str(cwd),
             dirs=dirs_str,
             config_files=config_str,
             readme=readme or "(none)",
+            stack=stack_str,
+            git_commits=git_commits or "(none)",
         )
 
         debug_log("Loading LLM for context generation...")
