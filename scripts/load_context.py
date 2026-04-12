@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
     load_config, get_project_dir, read_hook_input, get_cwd,
-    cwd_to_slug, truncate_to_tokens, DEBUG_LOG,
+    cwd_to_slug, truncate_to_tokens, DEBUG_LOG, notify_terminal,
 )
 from session_manager import (
     should_load_context, mark_session_loaded, cleanup_stale_markers,
@@ -149,25 +149,17 @@ def load_context() -> None:
         _debug(f"Returning {len(body)} chars of context")
 
         # Print to stdout — Claude reads this as system context
-        status_line = (
-            f"[claude-recall] 🧠 Loaded memory for '{slug}' "
-            f"({session_count} past sessions, {len(body)} chars)"
-        )
         print(
             f"<!-- claude-recall: project memory loaded -->\n"
-            f"**IMPORTANT: Start your FIRST response with this exact line "
-            f"on its own, then a blank line, then your normal answer:**\n"
-            f"`{status_line}`\n\n"
             f"{' | '.join(header_parts)}\n\n"
             + body
             + "\n\n> **claude-recall active** — context auto-saves when you stop.\n"
         )
 
-        # User-visible feedback on stderr
-        print(
+        # Write notification directly to user's terminal
+        notify_terminal(
             f"[claude-recall] ✓ Loaded context for '{slug}' "
-            f"({len(body)} chars, {session_count} past sessions)",
-            file=sys.stderr,
+            f"({len(body)} chars, {session_count} past sessions)"
         )
 
     except Exception as exc:

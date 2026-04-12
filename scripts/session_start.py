@@ -3,8 +3,7 @@
 session_start.py — claude-recall SessionStart hook.
 
 Fires when Claude Code starts a session.
-stdout → injected into Claude's system context (Claude sees it)
-stderr → may or may not be visible to user (version-dependent)
+Writes a notification directly to the user's terminal via /dev/ttyXXX.
 """
 import sys
 import os
@@ -21,7 +20,10 @@ except Exception:
 
 try:
     sys.path.insert(0, str(Path(__file__).parent))
-    from utils import load_config, get_cwd, cwd_to_slug, read_hook_input, get_project_dir
+    from utils import (
+        load_config, get_cwd, cwd_to_slug, read_hook_input,
+        get_project_dir, notify_terminal,
+    )
 
     hook_input = read_hook_input()
     cwd = get_cwd(hook_input)
@@ -32,21 +34,20 @@ try:
     sessions_dir = project_dir / "sessions"
     session_count = len(list(sessions_dir.glob("*.md"))) if sessions_dir.exists() else 0
 
-    # Print to STDOUT — Claude sees this as system context
+    # Write directly to the user's terminal (bypasses Claude Code capture)
     if context_md.exists():
-        print(
-            f"[claude-recall] 🧠 Project memory active for '{slug}' "
-            f"({session_count} past sessions). "
-            f"Context will load with your first prompt."
+        notify_terminal(
+            f"[claude-recall] 🧠 Memory loaded for '{slug}' "
+            f"({session_count} past sessions)"
         )
     else:
-        print(
-            f"[claude-recall] 🆕 New project '{slug}' detected. "
-            f"Context will be auto-generated on first prompt."
+        notify_terminal(
+            f"[claude-recall] 🆕 New project '{slug}' — "
+            f"context will be generated on first prompt"
         )
 
-    # Also stderr for terminal (may or may not be visible)
-    print(f"[claude-recall] ✓ Memory ready for '{slug}'", file=sys.stderr)
+    # Also print to stdout for Claude's context
+    print(f"[claude-recall] Project memory active for '{slug}'.")
 
     try:
         with open(_log, "a") as f:

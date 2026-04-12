@@ -47,6 +47,7 @@ from utils import (
     load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
     cwd_to_slug, now_str, filter_file_paths, detect_project_stack,
     parse_index_entries, build_index_table, ensure_model, DEBUG_LOG,
+    notify_terminal,
 )
 from session_manager import (
     build_session_note, clear_session_marker, cleanup_stale_markers,
@@ -420,7 +421,7 @@ def save_session() -> None:
     # The marker will be cleaned up by stale marker cleanup on next load.
 
     _debug(f"=== SAVED: {note_path} (turns={facts['turns']}, msgs={facts['total_messages']}) ===")
-    print(f"[claude-recall] Session saved → {slug} ({facts['turns']} turns)", file=sys.stderr)
+    notify_terminal(f"[claude-recall] ✓ Session saved → {slug} ({facts['turns']} turns)")
 
 
 if __name__ == "__main__":

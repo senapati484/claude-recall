@@ -36,6 +36,82 @@ def debug_log(msg: str) -> None:
         pass
 
 
+def notify_terminal(msg: str) -> None:
+    """Write a message directly to the user's terminal.
+
+    Claude Code captures stdout (as system context) and may not display stderr.
+    This function walks the process ancestor chain to find a TTY device,
+    then writes directly to it. Falls back to finding Claude's TTY by process name.
+    """
+    try:
+        import subprocess
+
+        def _get_tty(pid: str) -> str:
+            """Get TTY for a PID, return empty string if none."""
+            try:
+                r = subprocess.run(
+                    ["ps", "-o", "tty=", "-p", pid],
+                    capture_output=True, text=True, timeout=2
+                )
+                t = r.stdout.strip()
+                return t if t and t != "??" else ""
+            except Exception:
+                return ""
+
+        def _get_ppid(pid: str) -> str:
+            """Get parent PID for a PID."""
+            try:
+                r = subprocess.run(
+                    ["ps", "-o", "ppid=", "-p", pid],
+                    capture_output=True, text=True, timeout=2
+                )
+                return r.stdout.strip()
+            except Exception:
+                return ""
+
+        tty_name = ""
+
+        # Strategy 1: Walk ancestor chain up to 10 levels
+        current_pid = str(os.getpid())
+        for _ in range(10):
+            parent = _get_ppid(current_pid)
+            if not parent or parent == "0" or parent == "1":
+                break
+            tty_name = _get_tty(parent)
+            if tty_name:
+                break
+            current_pid = parent
+
+        # Strategy 2: Find Claude process directly by name
+        if not tty_name:
+            try:
+                r = subprocess.run(
+                    ["pgrep", "-f", "claude"],
+                    capture_output=True, text=True, timeout=2
+                )
+                for pid in r.stdout.strip().splitlines():
+                    pid = pid.strip()
+                    if pid:
+                        tty_name = _get_tty(pid)
+                        if tty_name:
+                            break
+            except Exception:
+                pass
+
+        if tty_name:
+            tty_path = f"/dev/{tty_name}"
+            if os.path.exists(tty_path):
+                fd = os.open(tty_path, os.O_WRONLY | os.O_NOCTTY)
+                os.write(fd, f"\033[36m{msg}\033[0m\n".encode())
+                os.close(fd)
+                debug_log(f"notify_terminal: wrote to {tty_path}")
+                return
+
+        debug_log(f"notify_terminal: no usable TTY found")
+    except Exception as e:
+        debug_log(f"notify_terminal: error: {e}")
+
+
 DEFAULT_CONFIG = {
     "vault_path": "",
     "vault_folder": "claude-recall",
