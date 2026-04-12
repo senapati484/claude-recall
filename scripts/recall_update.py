@@ -21,6 +21,7 @@ If the model is unavailable and auto-download fails, falls back to filesystem-on
 """
 
 import json
+import subprocess
 import sys
 import os
 from datetime import datetime
@@ -46,8 +47,8 @@ _CONTEXT_USER_TEMPLATE = """Analyze this project and produce a JSON summary.
 Project directory: {cwd}
 Top-level entries: {dirs}
 README excerpt: {readme}
-
-Stack detected from filesystem: {stack}
+Config files (CRITICAL — use these to detect the real stack): {config_files}
+Git commits: {git_commits}
 
 Output exactly this JSON — fill every field:
 {{
@@ -59,11 +60,15 @@ Output exactly this JSON — fill every field:
 }}
 
 Rules:
-- be accurate and concise
-- stack: list the main technologies/frameworks/libraries
+- Use config_files to determine the REAL stack — do NOT guess from directory names
+- For Flutter/Dart projects: stack must include "Flutter" and "Dart", NOT just "Python"
+- For Python projects: look for requirements.txt, setup.py, pyproject.toml
+- For Node projects: look for package.json dependencies
+- stack: list the actual technologies from config files (max 8)
 - key_directories: max 5 most important directories
 - entry_point: the main file or command to run the project
-- If README is empty/unavailable, infer from directory structure
+- description: what this specific project does (not a generic template description)
+- If README is a generic template (e.g. "This project is a starting point"), infer from config files
 """
 
 
@@ -110,13 +115,24 @@ def generate_llm_context(cwd: Path) -> dict | None:
         dirs = [p.name for p in cwd.iterdir() if p.is_dir() and not p.name.startswith(".")][:10]
         dirs_str = ", ".join(dirs)
         readme = get_readme_content(cwd)
-        stack_str = " · ".join(fs.get("stack", [])) or "not detected"
+        config_str = ", ".join(fs.get("config_files", [])) or "none"
+        git_commits = ""
+        try:
+            result = subprocess.run(
+                ["git", "log", "--oneline", "-5"],
+                cwd=str(cwd), capture_output=True, text=True, timeout=5
+            )
+            if result.returncode == 0:
+                git_commits = result.stdout.strip()
+        except Exception:
+            pass
 
         user_msg = _CONTEXT_USER_TEMPLATE.format(
             cwd=str(cwd),
             dirs=dirs_str,
             readme=readme or "(none)",
-            stack=stack_str,
+            config_files=config_str,
+            git_commits=git_commits or "(none)",
         )
 
         llm = Llama(

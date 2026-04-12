@@ -12,7 +12,7 @@ description: >
   Auto-generated sections are marked with `<!-- auto:*:start/end -->` markers.
   User-written content outside these markers is never overwritten.
 
-  The /recall command lets users trigger on-demand context updates from the terminal.
+  The /recall command (full path required — not a native slash command) lets users trigger on-demand context updates from the terminal.
 
   Storage: <vault>/claude-recall/projects/<project-slug>/context.md (auto-populated)
   and sessions/YYYY-MM-DD_HH-MM.md (auto-written). Project slug is derived from
@@ -69,20 +69,32 @@ The model is auto-downloaded on first use if missing, or during install.sh.
 
 ---
 
-## /recall Commands
+## /recall Command
 
-| Command | What it does |
-|---------|-------------|
-| `/recall` or `/recall update` | Scan project with LLM and update context.md |
-| `/recall status` | Show what claude-recall knows about this project |
-| `/recall reset` | Delete context.md and regenerate from scratch |
-
-**When Claude sees these commands, run:**
-```bash
-python3 ~/.claude/skills/claude-recall/scripts/recall_update.py <action> <cwd>
+To manually refresh project context during a session, **type the full command**:
+```
+/Users/sayansenapati/.claude/skills/claude-recall/scripts/recall_update.py update
 ```
 
-Where `<action>` is `update`, `status`, or `reset`, and `<cwd>` is the current working directory.
+Or from any project directory, run:
+```
+python3 ~/.claude/skills/claude-recall/scripts/recall_update.py update
+```
+
+Available actions:
+- `update` — Scan project with LLM and regenerate context.md
+- `status` — Show current context.md content
+- `reset` — Delete context.md and regenerate from scratch
+
+**Note**: `/recall` is not a native Claude Code command. You must use the full path above.
+The hint shown in Claude's context will remind you of this each session.
+
+## Quick Reference
+
+| What you type | What happens |
+|---|---|
+| Full path above | Runs /recall update — LLM regenerates context.md |
+| (context loads automatically) | Happens on first prompt of every session |
 
 ---
 
