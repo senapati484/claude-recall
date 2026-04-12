@@ -127,7 +127,11 @@ echo ""
 info "Downloading claude-recall..."
 
 # Detect if we're running from the repo (works even with `bash /path/to/install.sh`)
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# When piped via `curl | bash`, BASH_SOURCE is empty — default to ""
+SCRIPT_DIR=""
+if [ -n "${BASH_SOURCE[0]:-}" ]; then
+  SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+fi
 
 if [ -f "$SCRIPT_DIR/SKILL.md" ] && [ -d "$SCRIPT_DIR/scripts" ]; then
   info "Local repository detected at $SCRIPT_DIR"
@@ -314,7 +318,7 @@ for event, cmd in [("UserPromptSubmit", load_cmd), ("Stop", save_cmd)]:
     else:
         hooks.setdefault(event, []).append({
             "matcher": "",
-            "hooks": [{"type": "command", "command": cmd}]
+            "hooks": [{"type": "command", "command": cmd, "timeout": 60}]
         })
         print(f"  ✓ {event} — registered")
 

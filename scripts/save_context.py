@@ -27,6 +27,14 @@ import subprocess
 from datetime import datetime
 from pathlib import Path
 
+# EARLY DIAGNOSTIC — log immediately to confirm hook is being called
+try:
+    _log = Path.home() / ".claude" / "claude-recall-debug.log"
+    with open(_log, "a") as _f:
+        _f.write(f"[{datetime.now().isoformat()}] SAVE: >>> SCRIPT STARTED (pid={os.getpid()})\n")
+except Exception:
+    pass
+
 sys.path.insert(0, str(Path(__file__).parent))
 
 try:
