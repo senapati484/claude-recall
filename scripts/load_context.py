@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
     load_config, get_project_dir, read_hook_input, get_cwd,
-    cwd_to_slug, truncate_to_tokens, DEBUG_LOG, notify_terminal,
+    cwd_to_slug, truncate_to_tokens, DEBUG_LOG,
 )
 from session_manager import (
     should_load_context, mark_session_loaded, cleanup_stale_markers,
@@ -156,11 +156,6 @@ def load_context() -> None:
             + "\n\n> **claude-recall active** — context auto-saves when you stop.\n"
         )
 
-        # Write notification directly to user's terminal
-        notify_terminal(
-            f"[claude-recall] ✓ Loaded context for '{slug}' "
-            f"({len(body)} chars, {session_count} past sessions)"
-        )
 
     except Exception as exc:
         _debug(f"ERROR: {exc}\n{traceback.format_exc()}")

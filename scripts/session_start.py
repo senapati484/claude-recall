@@ -36,15 +36,9 @@ try:
 
     # Write directly to the user's terminal (bypasses Claude Code capture)
     if context_md.exists():
-        notify_terminal(
-            f"[claude-recall] 🧠 Memory loaded for '{slug}' "
-            f"({session_count} past sessions)"
-        )
+        notify_terminal(f"☰ recall: {slug} · {session_count} sessions")
     else:
-        notify_terminal(
-            f"[claude-recall] 🆕 New project '{slug}' — "
-            f"context will be generated on first prompt"
-        )
+        notify_terminal(f"☰ recall: new project '{slug}'")
 
     # Also print to stdout for Claude's context
     print(f"[claude-recall] Project memory active for '{slug}'.")

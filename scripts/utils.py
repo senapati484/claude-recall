@@ -102,7 +102,9 @@ def notify_terminal(msg: str) -> None:
             tty_path = f"/dev/{tty_name}"
             if os.path.exists(tty_path):
                 fd = os.open(tty_path, os.O_WRONLY | os.O_NOCTTY)
-                os.write(fd, f"\033[36m{msg}\033[0m\n".encode())
+                # \033[2m = dim, \033[36m = cyan, \033[0m = reset
+                # Leading \r\n ensures we start on a fresh line
+                os.write(fd, f"\r\n\033[2m\033[36m  {msg}\033[0m\r\n".encode())
                 os.close(fd)
                 debug_log(f"notify_terminal: wrote to {tty_path}")
                 return
