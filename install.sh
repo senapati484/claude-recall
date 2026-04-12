@@ -389,6 +389,12 @@ EOF
   ok "Vault folder ready → $VAULT_CR"
 fi
 
+# ── 8b. Register /claude-recall slash command ────────────────────────────────
+CMD_DIR="$HOME/.claude/commands"
+mkdir -p "$CMD_DIR"
+cp "$INSTALL_DIR/commands/claude-recall.md" "$CMD_DIR/claude-recall.md"
+echo "  ✓ /claude-recall slash command registered"
+
 # ── 9. Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "  ┌───────────────────────────────────────────────┐"
