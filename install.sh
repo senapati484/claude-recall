@@ -389,11 +389,16 @@ EOF
   ok "Vault folder ready → $VAULT_CR"
 fi
 
-# ── 8b. Register /claude-recall slash command ────────────────────────────────
+# ── 8b. Register /claude-recall slash commands ───────────────────────────────
 CMD_DIR="$HOME/.claude/commands"
 mkdir -p "$CMD_DIR"
+# Copy the top-level command and the subcommand directory
 cp "$INSTALL_DIR/commands/claude-recall.md" "$CMD_DIR/claude-recall.md"
-echo "  ✓ /claude-recall slash command registered"
+if [ -d "$INSTALL_DIR/commands/claude-recall" ]; then
+  mkdir -p "$CMD_DIR/claude-recall"
+  cp "$INSTALL_DIR/commands/claude-recall/"*.md "$CMD_DIR/claude-recall/"
+fi
+echo "  ✓ Slash commands registered: /claude-recall, :update, :status, :reset"
 
 # ── 9. Summary ────────────────────────────────────────────────────────────────
 echo ""

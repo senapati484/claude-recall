@@ -1,5 +1,5 @@
 ---
-description: Update project context using the local LLM (Qwen2.5 0.5B)
+description: Re-scan project and update context.md with the local LLM
 allowed-tools: Bash
 ---
 
