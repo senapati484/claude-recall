@@ -47,8 +47,9 @@ _CONTEXT_USER_TEMPLATE = """Analyze this project and produce a JSON summary.
 Project directory: {cwd}
 Top-level entries: {dirs}
 README excerpt: {readme}
-Config files (CRITICAL — use these to detect the real stack): {config_files}
-Git commits: {git_commits}
+Config files (contains actual file content — read to detect the real stack):
+{config_files}
+Git commits (use for clues about what the project does): {git_commits}
 
 Output exactly this JSON — fill every field:
 {{
@@ -60,15 +61,13 @@ Output exactly this JSON — fill every field:
 }}
 
 Rules:
-- Use config_files to determine the REAL stack — do NOT guess from directory names
-- For Flutter/Dart projects: stack must include "Flutter" and "Dart", NOT just "Python"
-- For Python projects: look for requirements.txt, setup.py, pyproject.toml
-- For Node projects: look for package.json dependencies
-- stack: list the actual technologies from config files (max 8)
-- key_directories: max 5 most important directories
-- entry_point: the main file or command to run the project
-- description: what this specific project does (not a generic template description)
-- If README is a generic template (e.g. "This project is a starting point"), infer from config files
+- READ the config_files content carefully — it tells you the real tech stack
+- pubspec.yaml → Flutter/Dart, requirements.txt → Python, package.json → Node.js
+- The "description" field should describe WHAT the project DOES (from config/git commits)
+- The "what_this_is" should be a concise one-liner about the project purpose
+- stack: list actual technologies from config files (max 8)
+- key_directories: max 5 most important directories (lib/, ios/, android/, etc.)
+- entry_point: the main file or command to run (e.g., "flutter run", "main.py")
 """
 
 
@@ -115,7 +114,20 @@ def generate_llm_context(cwd: Path) -> dict | None:
         dirs = [p.name for p in cwd.iterdir() if p.is_dir() and not p.name.startswith(".")][:10]
         dirs_str = ", ".join(dirs)
         readme = get_readme_content(cwd)
-        config_str = ", ".join(fs.get("config_files", [])) or "none"
+
+        # Read actual config file content (not just filenames) so LLM can detect the real stack
+        config_files = fs.get("config_files", [])
+        config_parts = []
+        for cf in config_files[:5]:  # max 5 config files
+            cf_path = cwd / cf
+            if cf_path.exists():
+                try:
+                    content = cf_path.read_text(encoding="utf-8")[:2000]  # first 2000 chars
+                    config_parts.append(f"=== {cf} ===\n{content}")
+                except Exception:
+                    pass
+        config_str = "\n".join(config_parts) if config_parts else "none"
+
         git_commits = ""
         try:
             result = subprocess.run(
