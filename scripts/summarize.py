@@ -1,117 +1,220 @@
 """
 summarize.py — Local LLM session summariser for claude-recall.
 
-Loads Qwen2.5 0.5B GGUF via llama-cpp-python and produces a structured
-JSON summary from a session transcript.
+Uses Qwen2.5 0.5B GGUF via llama-cpp-python to generate a structured
+summary from a session transcript.
 
-Called by save_context.py after every session. If the model file is absent
-or llama-cpp-python is not installed, returns None and save_context.py falls
-back to the original regex-based extract_facts().
+DESIGN: Qwen 0.5B is a very small model (490M params). We pre-extract
+facts with regex, then ask the LLM to ONLY rephrase/clean them into a
+readable summary. This avoids the model echoing prompt templates or
+hallucinating content.
+
+Called by save_context.py after every session. If the model is unavailable,
+returns None and save_context.py uses regex-based facts as fallback.
 """
+
+from __future__ import annotations
 
 import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from utils import get_model_path, llm_available, ensure_model
+from utils import get_model_path, llm_available, get_llm, DEBUG_LOG
 
-# Prompt template — kept short so it fits in a 2048-token context window
-_SYSTEM = (
-    "You are a senior developer writing a structured session note. "
-    "Respond ONLY with valid JSON. No markdown, no explanation."
-)
+from datetime import datetime
 
-_USER_TEMPLATE = """Read this Claude Code session transcript and produce a JSON summary.
-
-TRANSCRIPT (last {n} turns):
-{turns}
-
-Output exactly this JSON structure — fill every field:
-{{
-  "summary": "2-3 sentence description of what was actually accomplished",
-  "decisions": ["decision or finding 1", "decision or finding 2"],
-  "files_and_roles": {{"filename.ext": "what this file does / what changed"}},
-  "next_steps": ["concrete next step 1", "concrete next step 2"],
-  "keywords": ["tag1", "tag2", "tag3"]
-}}
-
-Rules:
-- summary must describe WHAT was done, not just "we talked about X"
-- decisions: real architectural or implementation decisions, not obvious steps
-- files_and_roles: only files actually touched or discussed, with their purpose
-- next_steps: actionable TODOs that follow directly from this session
-- keywords: 3-6 lowercase tags for searching
-- If the session was trivial or empty, still return valid JSON with honest short values
-"""
+def _debug(msg: str) -> None:
+    try:
+        with open(DEBUG_LOG, "a") as f:
+            f.write(f"[{datetime.now().isoformat()}] SUMMARIZE: {msg}\n")
+    except Exception:
+        pass
 
 
-def _build_prompt(messages: list[dict]) -> str:
-    """Format the last 32 user+assistant turns into a readable transcript string."""
-    recent = [m for m in messages if m.get("role") in ("user", "assistant")][-32:]
-    lines = []
-    for m in recent:
-        role = "User" if m["role"] == "user" else "Claude"
-        content = str(m.get("content", ""))[:800]  # cap per-message to save tokens
-        lines.append(f"{role}: {content}")
-    return "\n\n".join(lines)
+# Completion-style prompt for 0.5B model.
+# CRITICAL: Do NOT put placeholder text in the JSON template — Qwen 0.5B copies it.
+# Instead, give a concrete example in a different domain, then ask for the actual data.
+_SYSTEM = "You are a developer writing session notes. Respond with valid JSON only."
+
+_PROMPT = """Example session:
+User asked: "Add login page with OAuth"
+Files: auth.py, login.html
+Result: {{"summary": "Added OAuth login page with Google provider. Created auth.py for token handling and login.html for the UI.", "next_steps": ["Add logout button", "Test refresh tokens"], "keywords": ["auth", "oauth", "login"]}}
+
+Actual session:
+User asked: "{first_prompt}"
+Files: {files}
+Result: """
 
 
-def generate_summary(messages: list[dict]) -> dict | None:
-    """
-    Generate a structured session summary using the local Qwen model.
+def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | None:
+    """Generate a structured session summary using the local Qwen model.
 
-    Returns a dict with keys: summary, decisions, files_and_roles,
-    next_steps, keywords — or None if the model is unavailable or fails.
+    Args:
+        messages: list of {role, content} dicts from transcript
+        facts: pre-extracted facts dict (first_prompt, files, turns, etc.)
+              If provided, the LLM just rephrases the facts.
+              If not provided, extracts from messages.
 
-    If the model file is missing, attempts to auto-download it from HuggingFace.
+    Returns dict with keys: summary, next_steps, keywords
+    Or None if model unavailable or fails.
     """
     if not llm_available():
-        # Try to auto-download the model
-        if not ensure_model():
-            return None
+        return None
 
     try:
-        from llama_cpp import Llama
+        llm = get_llm()
+        if llm is None:
+            return None
 
-        model_path = str(get_model_path())
-        llm = Llama(
-            model_path=model_path,
-            n_ctx=8192,
-            n_threads=4,
-            n_gpu_layers=0,   # CPU only — no GPU assumption
-            verbose=False,
+        # Pre-extract facts if not provided
+        if facts is None:
+            facts = _quick_extract(messages)
+
+        first_prompt = facts.get("first_prompt", "unknown task")[:200]
+        files = facts.get("files", [])
+        files_str = ", ".join(files[:8]) if files else "unknown"
+
+        # Build the completion-style prompt
+        prompt = _PROMPT.format(
+            first_prompt=first_prompt,
+            files=files_str,
         )
-
-        turns_text = _build_prompt(messages)
-        user_msg = _USER_TEMPLATE.format(n=min(8, len(messages)), turns=turns_text)
 
         response = llm.create_chat_completion(
             messages=[
                 {"role": "system", "content": _SYSTEM},
-                {"role": "user",   "content": user_msg},
+                {"role": "user",   "content": prompt},
             ],
-            max_tokens=512,
-            temperature=0.1,   # low temp = more consistent JSON,
+            max_tokens=256,
+            temperature=0.1,
         )
 
-        raw = response["choices"][0]["message"]["content"].strip()
+        # Handle different response formats from llama-cpp-python
+        choice = response["choices"][0]
+        msg = choice.get("message", choice)
+        if isinstance(msg, str):
+            raw = msg.strip()
+        elif isinstance(msg, dict):
+            raw = (msg.get("content") or "").strip()
+        else:
+            return None
 
-        # Strip markdown code fences if the model added them despite instructions
+        _debug(f"LLM raw output: {raw[:200]}")
+
+        # Strip markdown fences
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
 
-        result = json.loads(raw)
+        raw = raw.strip()
 
-        # Validate expected keys are present
-        required = {"summary", "decisions", "files_and_roles", "next_steps", "keywords"}
-        if not required.issubset(result.keys()):
+        # Try direct JSON parse first
+        try:
+            result = json.loads(raw)
+        except json.JSONDecodeError:
+            # JSON repair for truncated output (common with small models)
+            result = _repair_json(raw)
+            if result is None:
+                _debug(f"JSON parse failed, repair also failed")
+                return None
+
+        # Validate — reject prompt echoes
+        summary = result.get("summary", "")
+        if not isinstance(summary, str) or len(summary) < 10:
+            _debug("Rejected: summary too short")
             return None
 
+        # Reject if it echoes the prompt template or the example
+        echo_patterns = [
+            "sentence description", "what was built", "respond only",
+            "added oauth login page with google",  # from example
+            "created auth.py for token handling",   # from example
+        ]
+        if any(p in summary.lower() for p in echo_patterns):
+            _debug(f"Rejected: prompt echo detected in summary: {summary[:80]}")
+            return None
+
+        # Ensure required keys
+        result.setdefault("next_steps", [])
+        result.setdefault("keywords", [])
+
+        # Backward compatibility: add empty optional fields
+        result.setdefault("decisions", [])
+        result.setdefault("files_and_roles", {})
+
+        _debug(f"LLM summary OK: {summary[:80]}")
         return result
 
+    except json.JSONDecodeError as e:
+        _debug(f"JSON parse failed: {e}")
+        return None
     except Exception as exc:
+        _debug(f"summarize error: {exc}")
         print(f"[claude-recall] summarize.py error: {exc}", file=sys.stderr)
         return None
+
+
+def _quick_extract(messages: list[dict]) -> dict:
+    """Quick regex extraction of facts from messages (no LLM needed)."""
+    import re
+
+    user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
+    all_text = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
+
+    # Files mentioned
+    file_re = re.compile(
+        r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
+        r'md|json|yaml|yml|toml|sh|html|css|scss)\b'
+    )
+    files = list(dict.fromkeys(m.group() for m in file_re.finditer(all_text)))[:15]
+
+    return {
+        "first_prompt": user_msgs[0][:300].replace("\n", " ") if user_msgs else "(no messages)",
+        "turns": len(user_msgs),
+        "files": files,
+    }
+
+
+def _repair_json(raw: str) -> dict | None:
+    """Try to extract a valid JSON object from truncated LLM output.
+
+    Common case: model generates valid JSON but it gets cut off at max_tokens.
+    We try to extract at least the "summary" field.
+    """
+    import re
+
+    # Try to extract summary field with regex
+    summary_match = re.search(r'"summary"\s*:\s*"([^"]+)"', raw)
+    if not summary_match:
+        return None
+
+    summary = summary_match.group(1).strip()
+    if len(summary) < 10:
+        return None
+
+    result = {"summary": summary, "next_steps": [], "keywords": []}
+
+    # Try to extract next_steps
+    steps_match = re.search(r'"next_steps"\s*:\s*\[([^\]]*)\]', raw)
+    if steps_match:
+        steps_raw = steps_match.group(1)
+        result["next_steps"] = [
+            s.strip().strip('"').strip("'")
+            for s in steps_raw.split(",")
+            if s.strip().strip('"').strip("'")
+        ]
+
+    # Try to extract keywords
+    kw_match = re.search(r'"keywords"\s*:\s*\[([^\]]*)\]', raw)
+    if kw_match:
+        kw_raw = kw_match.group(1)
+        result["keywords"] = [
+            k.strip().strip('"').strip("'")
+            for k in kw_raw.split(",")
+            if k.strip().strip('"').strip("'")
+        ]
+
+    return result

@@ -8,6 +8,32 @@ RAW_URL="https://raw.githubusercontent.com/senapati484/claude-recall/main"
 INSTALL_DIR="$HOME/.claude/skills/claude-recall"
 SETTINGS="$HOME/.claude/settings.json"
 CONFIG="$HOME/.claude/claude-recall.json"
+MODEL_DIR="$HOME/.claude/models"
+MODEL_FILE="$MODEL_DIR/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
+DEBUG_LOG="$HOME/.claude/claude-recall-debug.log"
+INSTALL_LOG="$HOME/.claude/claude-recall-install.log"
+
+# ── What this installer creates/modifies ──────────────────────────────────────
+#
+# FILES CREATED:
+#   $HOME/.claude/skills/claude-recall/       ← skill repo (scripts, SKILL.md, etc.)
+#   $HOME/.claude/claude-recall.json          ← config (vault path, settings)
+#   $HOME/.claude/models/qwen2.5-0.5b-*.gguf ← LLM model (~380 MB)
+#   $HOME/.claude/claude-recall-install.log   ← pip install log
+#   $HOME/.claude/claude-recall-debug.log     ← runtime debug log
+#   $HOME/.claude/.recall_*                   ← session markers (transient)
+#   <vault>/claude-recall/                    ← Obsidian vault structure
+#
+# FILES MODIFIED:
+#   $HOME/.claude/settings.json               ← adds UserPromptSubmit + Stop hooks
+#
+# PYTHON PACKAGES INSTALLED:
+#   llama-cpp-python                          ← local LLM inference engine
+#
+# To undo ALL of the above, run:
+#   bash ~/.claude/skills/claude-recall/uninstall.sh
+# ──────────────────────────────────────────────────────────────────────────────
 
 G='\033[0;32m'; C='\033[0;36m'; Y='\033[1;33m'; R='\033[0m'
 ok()   { echo -e "  ${G}✓${R} $1"; }
@@ -110,7 +136,6 @@ elif command -v git &>/dev/null; then
     git -C "$INSTALL_DIR" fetch --quiet
     git -C "$INSTALL_DIR" reset --hard --quiet origin/main
   elif [ -d "$INSTALL_DIR" ]; then
-    # Edge case: non-git existing install (curl-installed) — replace cleanly
     info "Replacing non-git install..."
     rm -rf "$INSTALL_DIR"
     git clone --depth 1 --quiet "$REPO_URL" "$INSTALL_DIR"
@@ -119,7 +144,7 @@ elif command -v git &>/dev/null; then
   fi
   ok "Cloned → $INSTALL_DIR"
 else
-  # curl fallback — download each file individually
+  # curl fallback
   mkdir -p "$INSTALL_DIR/scripts" "$INSTALL_DIR/references"
   for FILE in \
     "SKILL.md" \
@@ -130,6 +155,9 @@ else
     "scripts/save_context.py" \
     "scripts/summarize.py" \
     "scripts/recall_update.py" \
+    "scripts/scan_project.py" \
+    "scripts/context_builder.py" \
+    "scripts/session_manager.py" \
     "references/hook-api.md" \
     "references/context-structure.md"
   do
@@ -142,40 +170,61 @@ fi
 
 chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
 
-# ── 5a. Install llama-cpp-python ─────────────────────────────────────────────
+# ── 5. Install Python dependency: llama-cpp-python ────────────────────────────
 echo ""
-info "Installing llama-cpp-python..."
+info "Installing Python dependency: llama-cpp-python..."
+
+LLAMA_INSTALLED=0
+
+# Check if already importable
 if python3 -c "import llama_cpp" 2>/dev/null; then
     ok "llama-cpp-python already installed"
-elif ! command -v pip3 &>/dev/null && ! python3 -m pip --version &>/dev/null; then
-    warn "pip3 not found — trying python3 -m pip..."
-    if python3 -m pip install llama-cpp-python 2>&1 | tee -a "$HOME/.claude/claude-recall-install.log"; then
-        ok "llama-cpp-python installed via python3 -m pip"
-    else
-        warn "llama-cpp-python install failed — LLM summaries disabled"
-    fi
+    LLAMA_INSTALLED=1
 else
-    echo "  Installing llama-cpp-python (this takes 2-5 minutes)..."
-    INSTALL_LOG="$HOME/.claude/claude-recall-install.log"
-    if pip3 install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
-        ok "llama-cpp-python installed"
-    elif python3 -m pip install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
-        ok "llama-cpp-python installed via python3 -m pip"
-    elif python3 -c "import llama_cpp" 2>/dev/null; then
-        ok "llama-cpp-python installed"
+    echo "  Installing llama-cpp-python (this may take 2-5 minutes)..."
+    echo "  Log: $INSTALL_LOG"
+
+    # Attempt 1: pip3 install
+    if command -v pip3 &>/dev/null; then
+        if pip3 install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
+            LLAMA_INSTALLED=1
+        fi
+    fi
+
+    # Attempt 2: python3 -m pip
+    if [ "$LLAMA_INSTALLED" -eq 0 ]; then
+        if python3 -m pip install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
+            LLAMA_INSTALLED=1
+        fi
+    fi
+
+    # Attempt 3: pip3 with --no-cache-dir (clears stale wheel cache)
+    if [ "$LLAMA_INSTALLED" -eq 0 ]; then
+        if pip3 install --no-cache-dir llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
+            LLAMA_INSTALLED=1
+        fi
+    fi
+
+    # Final verification — python3 can actually import it
+    if [ "$LLAMA_INSTALLED" -eq 1 ]; then
+        if python3 -c "import llama_cpp; print('import OK')" >> "$INSTALL_LOG" 2>&1; then
+            ok "llama-cpp-python installed and verified"
+        else
+            LLAMA_INSTALLED=0
+            warn "llama-cpp-python installed but import failed"
+            warn "Check $INSTALL_LOG for details"
+        fi
     else
-        warn "llama-cpp-python install failed — LLM summaries disabled"
-        warn "To install manually: pip3 install llama-cpp-python"
+        warn "llama-cpp-python install failed — LLM summaries will be disabled"
+        warn "To install manually:"
+        warn "  pip3 install llama-cpp-python"
+        warn "  OR: CMAKE_ARGS='-DGGML_METAL=off' pip3 install llama-cpp-python"
     fi
 fi
 
-# ── 5b. Download Qwen2.5 0.5B GGUF model ─────────────────────────────────────
-MODEL_DIR="$HOME/.claude/models"
-MODEL_FILE="$MODEL_DIR/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-
+# ── 6. Download Qwen2.5 0.5B GGUF model ──────────────────────────────────────
 echo ""
-info "Checking local model..."
+info "Checking local LLM model..."
 mkdir -p "$MODEL_DIR"
 
 if [ -f "$MODEL_FILE" ] && [ -s "$MODEL_FILE" ]; then
@@ -203,7 +252,7 @@ else
     fi
 fi
 
-# ── 5. Register hooks ─────────────────────────────────────────────────────────
+# ── 7. Register hooks ─────────────────────────────────────────────────────────
 echo ""
 info "Registering hooks in $SETTINGS..."
 
@@ -222,7 +271,6 @@ if path.exists():
     try:
         settings = json.loads(path.read_text())
     except json.JSONDecodeError:
-        # Edge case: malformed settings.json — back up and start fresh
         warn_path = str(path) + ".bak"
         path.rename(warn_path)
         print(f"  ! settings.json was malformed — backed up to {warn_path}")
@@ -254,7 +302,7 @@ path.write_text(json.dumps(settings, indent=2))
 print(f"  ✓ Saved {path}")
 PYEOF
 
-# ── 6. Create vault folder skeleton ──────────────────────────────────────────
+# ── 8. Create vault folder skeleton ──────────────────────────────────────────
 VAULT_CR="$VAULT_PATH/claude-recall"
 mkdir -p "$VAULT_CR/projects"
 
@@ -274,15 +322,22 @@ EOF
   ok "Vault folder ready → $VAULT_CR"
 fi
 
-# ── 7. Done ───────────────────────────────────────────────────────────────────
+# ── 9. Summary ────────────────────────────────────────────────────────────────
 echo ""
-echo "  ┌───────────────────────────────┐"
-echo "  │   claude-recall installed  ✓  │"
-echo "  └───────────────────────────────┘"
+echo "  ┌───────────────────────────────────────────────┐"
+echo "  │   claude-recall installed  ✓                  │"
+echo "  └───────────────────────────────────────────────┘"
 echo ""
-echo "  Vault:    $VAULT_PATH"
-echo "  Notes at: $VAULT_CR/projects/<project>/"
-echo "  Model:    $MODEL_FILE"
+echo "  INSTALLED:"
+echo "    Skill:   $INSTALL_DIR"
+echo "    Config:  $CONFIG"
+echo "    Model:   $MODEL_FILE"
+echo "    Vault:   $VAULT_PATH"
+echo "    Hooks:   UserPromptSubmit + Stop in $SETTINGS"
+echo "    Python:  llama-cpp-python ($([ $LLAMA_INSTALLED -eq 1 ] && echo 'OK' || echo 'FAILED'))"
+echo ""
+echo "  TO UNINSTALL:"
+echo "    bash $INSTALL_DIR/uninstall.sh"
 echo ""
 echo "  NEXT STEP: Restart Claude Code."
 echo ""
@@ -290,10 +345,4 @@ echo "  After restart, open any project directory and start chatting."
 echo "  claude-recall will:"
 echo "    • Load context from Obsidian before your first message"
 echo "    • Save a session note to Obsidian when you exit"
-echo ""
-echo "  To add permanent project memory, open in Obsidian:"
-echo "    $VAULT_CR/projects/<project>/context.md"
-echo ""
-echo "  Update later:"
-echo "    curl -fsSL $RAW_URL/install.sh | bash"
 echo ""
