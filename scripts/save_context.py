@@ -267,6 +267,39 @@ def extract_decisions(transcript: dict) -> list[str]:
     return list(dict.fromkeys(decisions))[:5]
 
 
+def get_git_changes(cwd: Path) -> dict:
+    """Get actual changed files and recent commits from git.
+
+    Returns {"changed_files": [...], "recent_commits": [...], "branch": "..."}
+    Returns empty on failure (not a git repo, no changes, etc.)
+    """
+    result = {"changed_files": [], "recent_commits": [], "branch": ""}
+    try:
+        branch = subprocess.run(
+            ["git", "branch", "--show-current"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=3
+        )
+        if branch.returncode == 0:
+            result["branch"] = branch.stdout.strip()
+
+        diff = subprocess.run(
+            ["git", "diff", "--name-only", "HEAD"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=3
+        )
+        if diff.returncode == 0:
+            result["changed_files"] = [f for f in diff.stdout.strip().splitlines() if f]
+
+        log = subprocess.run(
+            ["git", "log", "--oneline", "-3"],
+            cwd=str(cwd), capture_output=True, text=True, timeout=3
+        )
+        if log.returncode == 0:
+            result["recent_commits"] = [c for c in log.stdout.strip().splitlines() if c]
+    except Exception:
+        pass
+    return result
+
+
 def extract_gotchas(transcript: dict) -> list[str]:
     """Extract important warnings/gotchas from assistant messages."""
     assistant_msgs = [m["content"] for m in transcript["messages"] if m.get("role") == "assistant"]
@@ -420,10 +453,12 @@ def save_session() -> None:
         all_prompts=facts.get("all_prompts", []),
     )
 
+    git_changes = get_git_changes(cwd)
+
     # Write session note — OVERWRITE same file for same session_id
     # This is critical because Stop fires after EVERY turn, not just at exit.
     # Each call gets the FULL growing transcript, so later calls have more data.
-    note = build_session_note(slug, cwd, session_id, facts, llm_data)
+    note = build_session_note(slug, cwd, session_id, facts, llm_data, git_changes)
     note_path = _session_note_path(project_dir / "sessions", session_id)
 
     _debug(f"Writing note to: {note_path} (overwrite={note_path.exists()})")

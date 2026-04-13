@@ -89,11 +89,33 @@ def clear_session_marker(session_id: str, cwd: Path) -> None:
 
 # ── Last session summary ──────────────────────────────────────────────────────
 
+def _session_is_useful_for_summary(note_text: str) -> bool:
+    """Check if a session note has enough signal to inject as prior context.
+
+    Uses a lenient check: has turns >= 3 OR (has LLM summary AND files).
+    Does NOT strip section headers — that would destroy the content.
+    """
+    has_turns = re.search(r"^turns:\s*(\d+)", note_text, re.MULTILINE)
+    turns = int(has_turns.group(1)) if has_turns else 0
+    has_llm = re.search(r"^llm_summary:\s*true", note_text, re.MULTILINE) is not None
+    has_files = re.search(r"## Files? Touched", note_text) is not None
+
+    # Quick length check — real sessions have meaningful content
+    # Strip only frontmatter + the ## Conversation/## Stats boilerplate headers
+    body = re.sub(r"^---.*?---\s*", "", note_text, flags=re.DOTALL).strip()
+    body = re.sub(r"^#.*$", "", body, flags=re.MULTILINE).strip()
+    body = re.sub(r"## (?:Conversation|Stats)\b.*$", "", body, flags=re.MULTILINE).strip()
+    is_meaningful = len(body) > 50
+
+    return (turns >= 3 or (has_llm and has_files)) and is_meaningful
+
+
 def get_last_session_summary(project_dir: Path) -> str | None:
-    """Get compact summary of the most recent session.
+    """Get compact summary of the most recent USEFUL session.
 
     Used by load_context.py to inject continuity into the context.
-    Returns a short string or None if no sessions exist.
+    Skips low-quality sessions (1-turn, no LLM, no files).
+    Returns a short string or None if no useful sessions exist.
     """
     sessions_dir = project_dir / "sessions"
     if not sessions_dir.exists():
@@ -101,11 +123,18 @@ def get_last_session_summary(project_dir: Path) -> str | None:
 
     try:
         notes = sorted(sessions_dir.glob("*.md"), reverse=True)
-        if not notes:
+        useful_note = None
+        for latest in notes:
+            text = latest.read_text(encoding="utf-8")
+            if not _session_is_useful_for_summary(text):
+                continue
+            useful_note = (latest, text)
+            break  # found the most recent useful session
+
+        if useful_note is None:
             return None
 
-        latest = notes[0]
-        text = latest.read_text(encoding="utf-8")
+        latest, text = useful_note
 
         # Extract key sections from the session note
         parts = []
@@ -156,6 +185,7 @@ def build_session_note(
     session_id: str,
     facts: dict,
     llm_summary: dict | None = None,
+    git_changes: dict | None = None,
 ) -> str:
     """Build a session note for saving to Obsidian.
 
@@ -193,6 +223,24 @@ def build_session_note(
         summary = "Topics: " + " → ".join(p[:80] for p in all_prompts[:3])
     else:
         summary = f"Started with: {facts.get('first_prompt', '?')}"
+
+    # --- Git activity ---
+    git_section = ""
+    if git_changes:
+        branch = git_changes.get("branch", "")
+        commits = git_changes.get("recent_commits", [])
+        changed = git_changes.get("changed_files", [])
+
+        if branch or commits or changed:
+            git_lines = []
+            if branch:
+                git_lines.append(f"- Branch: `{branch}`")
+            if commits:
+                git_lines.append(f"- Recent: {' | '.join(commits[:3])}")
+            if changed:
+                git_lines.append(f"- Changed: {', '.join(changed[:10])}")
+            if git_lines:
+                git_section = "\n## Git Activity\n\n" + "\n".join(git_lines) + "\n"
 
     # --- Files ---
     files_section = ""
@@ -244,6 +292,7 @@ def build_session_note(
         f"{facts.get('tool_count', 0)} tool calls\n"
         f"{conversation_section}"
         f"\n## Summary\n\n{summary}\n"
+        f"{git_section}"
         f"{files_section}"
         f"{next_section}"
         f"{keywords_section}"

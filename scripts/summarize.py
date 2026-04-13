@@ -37,17 +37,78 @@ def _debug(msg: str) -> None:
 # Qwen 0.5B (490M params) has a strong tendency to copy/echo example text.
 # We CANNOT use few-shot examples — it will copy them verbatim.
 # Instead: feed the extracted facts directly and ask for a clean-up rewrite.
-_SYSTEM = "You summarize coding sessions. Respond ONLY as JSON. ONLY describe what actually happened — never invent content."
+_SYSTEM_ONE_SHOT = "Extract structured facts from this developer conversation. Output only JSON."
 
-# This prompt feeds the ACTUAL conversation messages.
-# The model's job is to summarize what was discussed — NOT invent new info.
-_PROMPT = """Conversation log:
+_USER_ONE_SHOT = """Example:
+User: Add JWT auth to Express routes
+Claude: Added verifyToken middleware to protect /api/user and /api/orders endpoints.
+
+Output: {{"summary": "Added JWT middleware to Express routes, protecting auth endpoints", "next_steps": ["Add refresh token rotation", "Write auth middleware tests"], "keywords": ["jwt", "auth", "express", "middleware"], "decisions": ["Chose HS256 for speed over RS256"], "files_and_roles": {{"middleware/auth.js": "JWT verifyToken middleware", "routes/user.js": "Protected user routes"}}}}
+
+---
+Now extract facts from this conversation:
 {conversation}
 
-Files changed: {files}
+Output JSON only:"""
 
-Summarize ONLY what happened above as JSON:
-{{"summary": "<1-2 sentences of what actually happened>", "next_steps": ["<what to do next>"], "keywords": ["<topic1>", "<topic2>"]}}"""
+
+# Legacy constants (kept for compatibility during transition)
+_SYSTEM = _SYSTEM_ONE_SHOT
+_PROMPT = _USER_ONE_SHOT
+
+
+def clean_transcript(messages: list[dict]) -> list[dict]:
+    """Remove noise from messages before LLM summarization.
+
+    - Drops non-user/assistant roles
+    - Drops tool-use blocks (content as list)
+    - Drops assistant preambles ("I'll", "Let me", etc.)
+    - Truncates user to 200 chars
+    - Keeps only last sentence of assistant, max 300 chars
+    - Keeps max 8 messages total
+    """
+    PREAMBLES = ("i'll", "let me", "i will", "sure", "of course",
+                 "i'd be happy", "i can help", "i'm going to", "here's")
+
+    cleaned = []
+    for m in messages:
+        role = m.get("role", "")
+        content = m.get("content", "")
+
+        # Skip non-human roles
+        if role not in ("user", "assistant"):
+            continue
+
+        # Skip tool blocks
+        if isinstance(content, list):
+            continue
+
+        text = content.strip()
+        if not text:
+            continue
+
+        if role == "user":
+            # Keep full user prompt, truncate to 200
+            cleaned.append({"role": "user", "content": text[:200]})
+        else:
+            # Drop preambles — extract last meaningful sentence
+            lower = text.lower()
+            if any(lower.startswith(p) for p in PREAMBLES):
+                for sep in (". ", ": ", "\n"):
+                    idx = text.lower().find(sep, 10)
+                    if idx > 0:
+                        text = text[idx + len(sep):]
+                        break
+
+            # Keep last sentence, max 300 chars
+            sentences = text.rsplit(". ", 1)
+            last = sentences[-1] if len(sentences) > 1 else text
+            last = last[:300].strip()
+            if last:
+                cleaned.append({"role": "assistant", "content": last})
+
+    # Keep only last 8 messages
+    return cleaned[-8:]
 
 
 def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | None:
@@ -66,6 +127,9 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
         return None
 
     try:
+        # Pre-clean the transcript before LLM sees it
+        messages = clean_transcript(messages)
+
         llm = get_llm()
         if llm is None:
             return None
@@ -96,18 +160,15 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
 
         conversation = "\n".join(conv_lines) if conv_lines else "(empty session)"
 
-        # Build the conversation-aware prompt
-        prompt = _PROMPT.format(
-            conversation=conversation,
-            files=files_str,
-        )
+        # Build the conversation-aware prompt (one-shot format)
+        prompt = _USER_ONE_SHOT.format(conversation=conversation)
 
         response = llm.create_chat_completion(
             messages=[
-                {"role": "system", "content": _SYSTEM},
+                {"role": "system", "content": _SYSTEM_ONE_SHOT},
                 {"role": "user",   "content": prompt},
             ],
-            max_tokens=256,
+            max_tokens=300,
             temperature=0.1,
         )
 
@@ -143,12 +204,16 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
 
         # Normalize: ensure next_steps and keywords are always lists
         # (Qwen 0.5B sometimes returns them as strings)
-        for key in ("next_steps", "keywords"):
+        for key in ("next_steps", "keywords", "decisions"):
             val = result.get(key)
             if isinstance(val, str) and val.strip():
                 result[key] = [s.strip() for s in val.split(",") if s.strip()]
             elif not isinstance(val, list):
                 result[key] = []
+
+        # Ensure files_and_roles is always a dict
+        if not isinstance(result.get("files_and_roles"), dict):
+            result["files_and_roles"] = {}
 
         # Validate — reject prompt echoes and hallucinations
         summary = result.get("summary", "")

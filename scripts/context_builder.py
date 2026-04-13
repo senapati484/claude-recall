@@ -245,11 +245,26 @@ def build_compact_context(cwd: Path, slug: str) -> str:
     # Try LLM for description
     llm_ctx = _llm_describe_project(cwd, slug, readme_desc, stack, dirs)
 
-    # Build description — priority: README > LLM > filesystem
+    # Build description — priority: README > LLM > detected type
     if readme_desc:
         description = readme_desc
     elif llm_ctx and llm_ctx.get("description"):
         description = llm_ctx["description"]
+    elif fs.get("type") == "claude-skill":
+        # Pre-fill from SKILL.md auto markers if available
+        skill_md_path = cwd / "SKILL.md"
+        if skill_md_path.exists():
+            skill_text = skill_md_path.read_text(encoding="utf-8")
+            desc_match = re.search(
+                r'<!-- auto:what_this_is:start -->\s*(.+?)\s*<!-- auto:what_this_is:end -->',
+                skill_text, re.DOTALL
+            )
+            if desc_match:
+                description = desc_match.group(1).strip()
+            else:
+                description = f"Claude Code skill — {fs.get('name', slug)}"
+        else:
+            description = f"Claude Code skill — {fs.get('name', slug)}"
     elif fs.get("name"):
         type_labels = {
             "node": "Node.js project", "python": "Python project",
@@ -622,10 +637,8 @@ def is_context_empty_or_missing(project_dir: Path) -> bool:
 
     text = context_md.read_text(encoding="utf-8")
 
-    # Strip frontmatter + headers + auto markers + HTML comments
+    # Strip frontmatter + auto markers + HTML comments
     body = re.sub(r"^---.*?---\s*", "", text, flags=re.DOTALL).strip()
-    body = re.sub(r"^#.*$", "", body, flags=re.MULTILINE)
-    body = re.sub(r"##\s+.*$", "", body, flags=re.MULTILINE)
     body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
     body = body.strip()
 

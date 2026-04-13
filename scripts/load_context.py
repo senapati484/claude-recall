@@ -132,7 +132,40 @@ def load_context() -> None:
             _debug("No context found")
             return
 
-        body = "\n\n---\n\n".join(parts)
+        # Extract active task from most recent session's Next Steps
+        active_task = ""
+        try:
+            sessions_dir = project_dir / "sessions"
+            if sessions_dir.exists():
+                notes = sorted(sessions_dir.glob("*.md"), reverse=True)
+                if notes:
+                    latest = notes[0].read_text(encoding="utf-8")
+                    task_match = re.search(r"## Next Steps\s*\n- \[ \] (.+)", latest)
+                    if task_match:
+                        active_task = task_match.group(1).strip()
+                        if len(active_task) > 100:
+                            active_task = active_task[:100] + "..."
+        except Exception:
+            pass
+
+        # Label each section with semantic priority (case-insensitive prefix match)
+        labeled_parts = []
+        for part in parts:
+            plower = part.lower()
+            if plower.startswith("## project context"):
+                labeled_parts.append("[MUST KNOW]\n" + part)
+            elif plower.startswith("## previous session"):
+                labeled_parts.append("[RECENT WORK]\n" + part)
+            elif plower.startswith("## key files"):
+                labeled_parts.append("[KEY FILES]\n" + part)
+            else:
+                labeled_parts.append(part)
+
+        # Prepend active task if found
+        if active_task:
+            labeled_parts.insert(0, f"LAST SESSION ENDED WITH: {active_task}")
+
+        body = "\n\n---\n\n".join(labeled_parts)
         body = truncate_to_tokens(body, max_ctx)
 
         # Header
