@@ -9,11 +9,15 @@ Actions:
     update   Regenerate mindmap.json from filesystem + README
     status   Show current mindmap status as tree
     query    Search mindmap for relevant context
+    doctor   Check setup health and LLM backend availability
     reset    Delete mindmap.json and regenerate from scratch
 """
 
 import sys
 import os
+import shutil
+import subprocess
+import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -151,6 +155,75 @@ def action_reset(cwd: Path, cfg: dict) -> None:
     action_update(cwd, cfg)
 
 
+def action_doctor(cwd: Path, cfg: dict) -> None:
+    """Check claude-recall setup health."""
+    print("## claude-recall: doctor")
+    print()
+    
+    # Check claude CLI
+    claude_path = shutil.which("claude")
+    if claude_path:
+        print(f"  ✓ claude CLI: {claude_path}")
+        try:
+            r = subprocess.run(
+                ["claude", "-p", "--bare", "--dangerously-skip-permissions",
+                 "--output-format", "text", "Reply with: OK"],
+                capture_output=True, text=True, timeout=15,
+            )
+            if r.returncode == 0:
+                print(f"  ✓ claude -p: working (response: {r.stdout.strip()[:20]})")
+            else:
+                print(f"  ✗ claude -p: returned code {r.returncode}")
+                print(f"    stderr: {r.stderr[:100]}")
+        except Exception as e:
+            print(f"  ✗ claude -p test failed: {e}")
+    else:
+        print("  ✗ claude CLI: not found in PATH")
+    
+    # Check API keys (fallback)
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        print("  ✓ ANTHROPIC_API_KEY: set")
+    else:
+        print("  - ANTHROPIC_API_KEY: not set (ok if using claude CLI)")
+    
+    if os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"):
+        print("  ✓ NVIDIA NIM: configured")
+    
+    # Check vault + mindmap
+    slug = cwd_to_slug(cwd)
+    project_dir = get_project_dir(cfg, slug)
+    mindmap_path = project_dir / "mindmap.json"
+    
+    print()
+    print(f"  Project slug: {slug}")
+    print(f"  Vault: {cfg.get('vault_path')}")
+    
+    if mindmap_path.exists():
+        data = json.loads(mindmap_path.read_text())
+        nodes = data.get("nodes", {})
+        stale = [k for k, v in nodes.items() if v.get("stale")]
+        print(f"  ✓ mindmap.json: {len(nodes)} nodes ({len(stale)} stale)")
+    else:
+        print(f"  - mindmap.json: not generated yet (run: /recall update)")
+    
+    # Check hooks registered
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if settings_path.exists():
+        settings = json.loads(settings_path.read_text())
+        hooks = settings.get("hooks", {})
+        for event in ["UserPromptSubmit", "Stop", "PostToolUse"]:
+            found = any(
+                "claude-recall" in h.get("command", "")
+                for e in hooks.get(event, [])
+                for h in e.get("hooks", [])
+            )
+            status = "✓" if found else "✗"
+            print(f"  {status} Hook: {event}")
+    
+    print()
+    print("Run 'python3 recall_update.py update' to regenerate mindmap.")
+
+
 def main() -> None:
     action = "status"
     cwd = Path(os.getcwd())
@@ -183,9 +256,11 @@ def main() -> None:
             sys.exit(1)
     elif action in ("reset", "r"):
         action_reset(cwd, cfg)
+    elif action in ("doctor", "d"):
+        action_doctor(cwd, cfg)
     else:
         print(f"Unknown action: {action}")
-        print("Usage: recall_update.py [update|status|query|reset] [cwd]")
+        print("Usage: recall_update.py [update|status|query|doctor|reset] [cwd]")
         sys.exit(1)
 
 
