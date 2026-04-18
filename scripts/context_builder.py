@@ -164,6 +164,56 @@ def detect_env_files(cwd: Path) -> dict[str, list[str]]:
 
 # ── Mindmap builder (replaces build_compact_context) ────────────────────────
 
+def _generate_overview_with_claude_cli(cwd: Path, slug: str, stack_info: dict, readme_desc: str) -> str:
+    """Use claude -p to generate a rich project overview for the mindmap.
+    
+    Falls back to readme_desc if claude CLI unavailable.
+    """
+    import shutil, subprocess
+    
+    if not shutil.which("claude"):
+        return readme_desc
+    
+    stack = ' · '.join(stack_info.get('stack', [])) or 'unknown'
+    
+    # Look for key files to give Claude context
+    key_files = []
+    for pattern in ['README.md', 'package.json', 'pubspec.yaml', 'Cargo.toml', 'pyproject.toml']:
+        f = cwd / pattern
+        if f.exists():
+            try:
+                content = f.read_text(encoding='utf-8', errors='ignore')[:500]
+                key_files.append(f"=== {pattern} ===\n{content}")
+            except Exception:
+                pass
+    
+    file_context = '\n\n'.join(key_files[:2]) if key_files else 'No config files found'
+    
+    prompt = f"""Analyze this project and write a 2-3 sentence description of what it does and its architecture.
+Project slug: {slug}
+Detected stack: {stack}
+
+Project files:
+{file_context}
+
+Write only the description. No headers, no lists, no markdown. Just plain sentences."""
+    
+    try:
+        result = subprocess.run(
+            ["claude", "-p", "--bare", "--dangerously-skip-permissions",
+             "--output-format", "text", prompt],
+            capture_output=True, text=True, timeout=25, cwd=str(cwd),
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            desc = result.stdout.strip()
+            if len(desc) > 20:
+                return desc
+    except Exception:
+        pass
+    
+    return readme_desc
+
+
 def build_initial_mindmap(cwd: Path, slug: str, project_dir: Path) -> dict:
     """Build initial mindmap from project filesystem.
 
@@ -177,12 +227,16 @@ def build_initial_mindmap(cwd: Path, slug: str, project_dir: Path) -> dict:
     """
     stack_info = detect_project_stack(cwd)
     readme_desc = read_readme_description(cwd)
+    
+    # Enhance with Claude CLI if available
+    overview_content = _generate_overview_with_claude_cli(cwd, slug, stack_info, readme_desc)
+    _debug(f"Generated overview: {overview_content[:80]}...")
 
     mindmap = build_initial_mindmap_from_stack(cwd, slug, stack_info)
 
-    if readme_desc and "project_overview" in mindmap["nodes"]:
+    if overview_content and "project_overview" in mindmap["nodes"]:
         existing = mindmap["nodes"]["project_overview"]
-        existing["content"] = readme_desc
+        existing["content"] = overview_content
         existing["last_updated"] = datetime.now().strftime("%Y-%m-%d")
         existing_keywords = set(existing.get("keywords", []))
         existing_keywords.update([slug.lower(), "project", "overview"])
