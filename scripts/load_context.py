@@ -109,12 +109,20 @@ def load_context() -> None:
 
         cleanup_stale_markers()
 
-        if not cfg.get("load_on_every_prompt", True):
-            if not should_load_context(session_id, cwd):
-                _debug("Skipping - marker exists (session already loaded)")
-                return
-
-        mark_session_loaded(session_id, cwd)
+        # Determine if this is the first prompt of the session
+        is_first_prompt = should_load_context(session_id, cwd)
+        
+        if is_first_prompt:
+            mark_session_loaded(session_id, cwd)
+        
+        # Always load if we have a prompt to match against (per-prompt keyword mode)
+        # OR if it's the first prompt (full context mode)
+        has_prompt = bool(current_prompt.strip())
+        should_run = is_first_prompt or (has_prompt and cfg.get("load_on_every_prompt", True))
+        
+        if not should_run:
+            _debug("Skipping - no prompt text and not first prompt")
+            return
 
         slug = cwd_to_slug(cwd)
 
@@ -140,11 +148,23 @@ def load_context() -> None:
 
         mindmap = load_mindmap(project_dir)
 
-        if current_prompt:
-            relevant = get_relevant_nodes(mindmap, current_prompt, max_nodes=3)
-        else:
+        if is_first_prompt and not current_prompt:
+            # First prompt with no text yet — inject overview + recent session
             all_nodes = mindmap.get("nodes", {})
-            relevant = [{"node_id": k, **v} for k, v in all_nodes.items()][:2]
+            relevant = [
+                {"node_id": k, **v} 
+                for k, v in list(all_nodes.items())[:3]
+                if v.get("content")
+            ]
+            _debug("First prompt: injecting top 3 nodes (no prompt text yet)")
+        elif current_prompt:
+            # Subsequent prompts — keyword match to inject only relevant nodes
+            max_nodes = 2 if not is_first_prompt else 3
+            relevant = get_relevant_nodes(mindmap, current_prompt, max_nodes=max_nodes)
+            _debug(f"Keyword match on '{current_prompt[:50]}': {[r['node_id'] for r in relevant]}")
+        else:
+            _debug("No prompt and not first — skipping injection")
+            return
 
         _debug(f"Found {len(relevant)} relevant nodes")
 
