@@ -282,67 +282,69 @@ def _build_project_context(mindmap: dict) -> str:
 
 
 def summarize_stale_node(node_id: str, node_data: dict, project_context: str) -> str:
-    """Re-summarize a stale node using Claude API (Anthropic or NVIDIA NIM).
+    """Re-summarize a stale node using claude -p CLI or API fallback."""
+    import shutil
+    
+    current_content = node_data.get("content", "")
+    files_changed = node_data.get("files", [])
+    
+    system_prompt = "You are a developer context updater. Respond with only the updated description in 1-2 sentences, no explanation."
+    user_prompt = f"""Project context: {project_context}
+Current node description for '{node_id}': {current_content}
+Files recently changed: {', '.join(files_changed[:5]) if files_changed else 'none'}
 
-    Args:
-        node_id: ID of the node to summarize
-        node_data: Current node data dict
-        project_context: Brief project context string
+Write an updated 1-2 sentence description for this node. Only output the description, nothing else."""
 
-    Returns:
-        Updated content string, or original on failure.
-        If no API available, returns node_data["content"] unchanged.
-    """
-    if not llm_available():
-        return node_data.get("content", "")
-
-    try:
-        current_content = node_data.get("content", "")
-        files_changed = node_data.get("files", [])
-
-        system_prompt = "You are a developer context updater. Respond with only the updated description, no explanation."
-        user_prompt = f"""Given this context about a project: {project_context}
-Update this node's description in 1-2 sentences: {current_content}
-Recent files changed: {files_changed}
-
-Respond with only the updated description, no explanation."""
-
-        if is_nvidia_nim():
-            from openai import OpenAI
-            client = OpenAI(
-                api_key=os.environ.get("OPENAI_API_KEY"),
-                base_url=os.environ.get("NVIDIA_NIM_BASE_URL"),
+    updated = None
+    
+    # Try claude -p CLI first
+    if shutil.which("claude"):
+        try:
+            import subprocess
+            full_prompt = f"{system_prompt}\n\n{user_prompt}"
+            result = subprocess.run(
+                ["claude", "-p", "--bare", "--dangerously-skip-permissions", 
+                 "--output-format", "text", full_prompt],
+                capture_output=True, text=True, timeout=20,
             )
-            response = client.chat.completions.create(
-                model="claude-3-5-haiku-20241022",
-                max_tokens=100,
-                temperature=0,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-            )
-            updated = response.choices[0].message.content.strip()
-        else:
-            import anthropic
-            client = anthropic.Anthropic()
-            response = client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=100,
-                temperature=0,
-                system=system_prompt,
-                messages=[{"role": "user", "content": user_prompt}],
-            )
-            updated = response.content[0].text.strip()
-
-        if len(updated) > 5 and "given this context" not in updated.lower():
-            return updated
-
-        return node_data.get("content", "")
-
-    except Exception as e:
-        _debug(f"summarize_stale_node error: {e}")
-        return node_data.get("content", "")
+            if result.returncode == 0 and result.stdout.strip():
+                updated = result.stdout.strip()
+                _debug(f"Stale node '{node_id}' re-summarized via claude -p")
+        except Exception as e:
+            _debug(f"claude -p stale node error: {e}")
+    
+    # Fall back to direct API
+    if not updated:
+        try:
+            from summarize import is_nvidia_nim
+            if is_nvidia_nim():
+                from openai import OpenAI
+                client = OpenAI(
+                    api_key=os.environ.get("OPENAI_API_KEY"),
+                    base_url=os.environ.get("NVIDIA_NIM_BASE_URL"),
+                )
+                response = client.chat.completions.create(
+                    model="claude-3-5-haiku-20241022", max_tokens=100, temperature=0,
+                    messages=[{"role": "system", "content": system_prompt},
+                              {"role": "user", "content": user_prompt}],
+                )
+                updated = response.choices[0].message.content.strip()
+            elif os.environ.get("ANTHROPIC_API_KEY"):
+                import anthropic
+                client = anthropic.Anthropic()
+                response = client.messages.create(
+                    model="claude-haiku-4-5-20251001", max_tokens=100, temperature=0,
+                    system=system_prompt,
+                    messages=[{"role": "user", "content": user_prompt}],
+                )
+                updated = response.content[0].text.strip()
+        except Exception as e:
+            _debug(f"API stale node fallback error: {e}")
+    
+    # Validate and return
+    if updated and len(updated) > 5 and "given this context" not in updated.lower():
+        return updated
+    return current_content
 
 
 # ── Context check (updated for mindmap) ─────────────────────────────────────
