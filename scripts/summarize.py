@@ -1,12 +1,13 @@
 """
 summarize.py — Session summariser for claude-recall.
 
-Uses Claude API (Anthropic or NVIDIA NIM) to generate structured summary
-from session transcript. Falls back to regex if API unavailable.
+Uses Claude CLI or API (Anthropic/NVIDIA NIM) to generate structured summary
+from session transcript. Falls back to regex if no LLM available.
 
-Supports:
-- Anthropic: ANTHROPIC_API_KEY
-- NVIDIA NIM: OPENAI_API_KEY + NVIDIA_NIM_BASE_URL
+Provider priority:
+1. Claude CLI (claude -p) — uses Claude Code's auth, no API key needed
+2. Anthropic API — ANTHROPIC_API_KEY
+3. NVIDIA NIM — OPENAI_API_KEY + NVIDIA_NIM_BASE_URL
 """
 
 from __future__ import annotations
@@ -14,12 +15,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
+import threading
 from pathlib import Path
 
 
 def llm_available() -> bool:
-    """Check if Claude API is available (Anthropic or NVIDIA NIM)."""
+    """Check if any LLM backend is available (CLI, Anthropic, or NVIDIA NIM)."""
+    if shutil.which("claude"):
+        return True
     if os.environ.get("ANTHROPIC_API_KEY"):
         return True
     if os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"):
@@ -30,6 +36,48 @@ def llm_available() -> bool:
 def is_nvidia_nim() -> bool:
     """Check if using NVIDIA NIM."""
     return bool(os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"))
+
+
+def cli_available() -> bool:
+    """Check if claude CLI is available."""
+    return shutil.which("claude") is not None
+
+
+def _call_claude_cli(system_prompt: str, user_prompt: str) -> str | None:
+    """Call Claude using the claude -p CLI (uses Claude Code's own auth).
+    
+    This works without ANTHROPIC_API_KEY since it uses Claude Code's
+    existing authentication. Uses --bare to prevent hook recursion.
+    """
+    if not shutil.which("claude"):
+        return None
+    
+    full_prompt = f"{system_prompt}\n\n{user_prompt}"
+    
+    try:
+        result = subprocess.run(
+            [
+                "claude",
+                "-p",
+                "--bare",
+                "--dangerously-skip-permissions",
+                "--output-format", "text",
+                full_prompt,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip()
+        _debug(f"claude -p returned code {result.returncode}: {result.stderr[:100]}")
+        return None
+    except subprocess.TimeoutExpired:
+        _debug("claude -p timed out")
+        return None
+    except Exception as e:
+        _debug(f"claude -p error: {e}")
+        return None
 
 
 def _debug(msg: str) -> None:
@@ -190,10 +238,23 @@ Output JSON with these keys:
 
 Output JSON only:"""
 
-        if is_nvidia_nim():
-            raw = _call_nvidia_nim(system_prompt, user_prompt)
-        else:
-            raw = _call_anthropic(system_prompt, user_prompt)
+        # Try claude CLI first (no API key needed, uses Claude Code's auth)
+        raw = None
+        if cli_available():
+            raw = _call_claude_cli(system_prompt, user_prompt)
+            if raw:
+                _debug("Used claude -p CLI for summarization")
+
+        # Fall back to direct API if CLI unavailable or failed
+        if not raw:
+            if is_nvidia_nim():
+                raw = _call_nvidia_nim(system_prompt, user_prompt)
+                if raw:
+                    _debug("Used NVIDIA NIM for summarization")
+            elif os.environ.get("ANTHROPIC_API_KEY"):
+                raw = _call_anthropic(system_prompt, user_prompt)
+                if raw:
+                    _debug("Used Anthropic API for summarization")
 
         if not raw:
             return None
