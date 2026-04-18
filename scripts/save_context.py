@@ -52,9 +52,10 @@ from session_manager import (
     build_session_note, clear_session_marker, cleanup_stale_markers,
 )
 from context_builder import (
-    update_context_after_session, is_context_empty_or_missing,
-    build_compact_context,
+    update_mindmap_after_session, is_context_empty_or_missing,
+    build_initial_mindmap,
 )
+from mindmap import load_mindmap, mindmap_to_context_md
 
 
 def _debug(msg: str) -> None:
@@ -417,41 +418,48 @@ def save_session() -> None:
     elif facts["total_messages"] < 2:
         _debug(f"Skipping LLM summary — only {facts['total_messages']} messages (minimum 2)")
 
-    # Generate context.md if it doesn't exist yet
+    # Generate mindmap.json if it doesn't exist yet
     if is_context_empty_or_missing(project_dir):
         try:
-            print(f"[claude-recall] Generating context for '{slug}'...", file=sys.stderr)
-            content = build_compact_context(cwd, slug)
-            (project_dir / "context.md").write_text(content, encoding="utf-8")
-            _debug("Created initial context.md")
+            print(f"[claude-recall] Generating mindmap for '{slug}'...", file=sys.stderr)
+            mindmap = build_initial_mindmap(cwd, slug, project_dir)
+            _debug(f"Created initial mindmap.json ({len(mindmap.get('nodes', {}))} nodes)")
         except Exception as e:
-            _debug(f"Failed to create context.md: {e}")
+            _debug(f"Failed to create mindmap.json: {e}")
 
-    # Build current_state from LLM or regex
-    current_state = ""
-    if llm_data and llm_data.get("summary"):
-        current_state = f"Last session: {llm_data['summary'][:200]}"
+    # Build summary dict for mindmap update
+    summary_dict = {}
+    if llm_data:
+        summary_dict = {
+            "summary": llm_data.get("summary", ""),
+            "keywords": llm_data.get("keywords", []),
+            "decisions": llm_data.get("decisions", []),
+            "files_and_roles": llm_data.get("files_and_roles", {}),
+        }
     else:
-        current_state = extract_current_state(transcript)
+        decisions = extract_decisions(transcript)
+        files_and_roles = {f: "modified" for f in key_files[:5]}
+        summary_dict = {
+            "summary": extract_current_state(transcript),
+            "keywords": [],
+            "decisions": decisions,
+            "files_and_roles": files_and_roles,
+        }
 
-    decisions = extract_decisions(transcript)
-    gotchas = extract_gotchas(transcript)
-
-    # Normalize file paths for key_files update
-    key_files = filter_file_paths(facts.get("files", []), cwd)
-
-    # Update context.md with session learnings
-    update_context_after_session(
+    # Update mindmap.json with session learnings
+    changed_files = facts.get("files", []) + git_changes.get("changed_files", [])
+    update_mindmap_after_session(
         project_dir=project_dir,
-        slug=slug,
-        cwd=cwd,
-        current_state=current_state,
-        decisions=decisions if decisions else None,
-        gotchas=gotchas if gotchas else None,
-        key_files_update=key_files[:10] if key_files else None,
-        session_summary=current_state,
-        all_prompts=facts.get("all_prompts", []),
+        session_summary=summary_dict,
+        changed_files=changed_files,
     )
+
+    # Also write human-readable context.md for Obsidian viewing
+    mindmap = load_mindmap(project_dir)
+    context_md_content = mindmap_to_context_md(mindmap)
+    (project_dir / "context.md").write_text(context_md_content, encoding="utf-8")
+
+    _debug(f"Mindmap updated: {len(mindmap.get('nodes', {}))} nodes")
 
     git_changes = get_git_changes(cwd)
 

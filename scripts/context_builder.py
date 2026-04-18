@@ -1,18 +1,18 @@
 """
-context_builder.py — Compact, high-signal context generation for claude-recall.
+context_builder.py — Mindmap builder for claude-recall.
 
-Builds context.md files that are:
-- Small (< 60 lines, < 1500 tokens)
-- High-signal (every line helps Claude)
-- Accurate (uses README + filesystem detection, not LLM hallucination)
+Builds mindmap.json files that store structured project context:
+- Project overview, tech stack, environment
+- File-to-node mappings for relevance
+- Session learnings and accumulated knowledge
 
-Replaces the bloated auto_generate_context_md() and build_context_md()
-functions that produced generic, token-wasting context.
+Replaces the context.md approach with structured mindmap storage.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from datetime import datetime
@@ -21,8 +21,17 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
-    detect_project_stack, get_model_path, DEBUG_LOG,
-    merge_auto_section,
+    detect_project_stack, DEBUG_LOG,
+    merge_auto_section, llm_available, is_nvidia_nim,
+)
+
+from mindmap import (
+    build_initial_mindmap_from_stack,
+    save_mindmap,
+    load_mindmap,
+    upsert_node,
+    mark_files_stale,
+    get_relevant_nodes,
 )
 
 
@@ -59,27 +68,23 @@ def _extract_description(text: str) -> str:
     if not lines:
         return ""
 
-    # First pass: try to extract from HTML <strong> or <h1> tags
     full_text = "\n".join(lines[:50])
 
-    # Look for <strong>text</strong> in opening HTML (common in centered READMEs)
     strong_match = re.search(r'<strong>([^<]+)</strong>', full_text)
     if strong_match:
         candidate = strong_match.group(1).strip()
         if len(candidate) > 15 and "<" not in candidate:
             return candidate
 
-    # Strip ALL HTML tags and entities for plain text extraction
     def strip_html(s: str) -> str:
-        s = re.sub(r'<[^>]+>', ' ', s)  # tags → space
+        s = re.sub(r'<[^>]+>', ' ', s)
         s = s.replace('&nbsp;', ' ')
         s = s.replace('&amp;', '&')
         s = s.replace('&lt;', '<')
         s = s.replace('&gt;', '>')
-        s = re.sub(r'&\w+;', ' ', s)  # other entities
+        s = re.sub(r'&\w+;', ' ', s)
         return re.sub(r'\s+', ' ', s).strip()
 
-    # Second pass: find first meaningful paragraph after heading
     content_lines = []
     past_header = False
     in_html_block = False
@@ -87,7 +92,6 @@ def _extract_description(text: str) -> str:
     for line in lines[:50]:
         stripped = line.strip()
 
-        # Track HTML blocks (skip entire <p>...</p>, <div>...</div> blocks)
         if re.match(r'^<(p|div|table|details|summary)\b', stripped, re.I):
             in_html_block = True
         if re.match(r'^</(p|div|table|details|summary)>', stripped, re.I):
@@ -96,7 +100,6 @@ def _extract_description(text: str) -> str:
         if in_html_block:
             continue
 
-        # Skip badges, images, HTML lines
         if any(p in stripped for p in ["![", "<img", "<a ", "[![", "```", "<br"]):
             continue
         if stripped.startswith("---") or stripped.startswith("<"):
@@ -106,22 +109,19 @@ def _extract_description(text: str) -> str:
                 break
             continue
 
-        # Skip the main title (# heading)
         if stripped.startswith("# ") and not past_header:
             past_header = True
             continue
 
-        # Skip ## sub-headings used as section markers
         if stripped.startswith("## "):
             if not content_lines:
                 past_header = True
                 continue
             break
 
-        # This is actual content
         cleaned = strip_html(stripped)
-        cleaned = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', cleaned)  # links
-        cleaned = re.sub(r'[*_`]', '', cleaned)  # emphasis
+        cleaned = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', cleaned)
+        cleaned = re.sub(r'[*_`]', '', cleaned)
         cleaned = cleaned.strip()
 
         if len(cleaned) > 10:
@@ -129,7 +129,6 @@ def _extract_description(text: str) -> str:
             past_header = True
 
     description = " ".join(content_lines).strip()
-    # Truncate to ~200 chars at sentence boundary
     if len(description) > 200:
         cut = description[:200].rfind(".")
         if cut > 80:
@@ -139,285 +138,233 @@ def _extract_description(text: str) -> str:
     return description
 
 
-# ── LLM context generation ───────────────────────────────────────────────────
+# ── Env file detection (keep existing) ────────────────────────────────────────
 
-_LLM_SYSTEM = "You are a developer. Respond ONLY with valid JSON."
+def detect_env_files(cwd: Path) -> dict[str, list[str]]:
+    """Detect environment configuration files."""
+    results = {"env_files": [], "config_files": []}
 
-_LLM_PROMPT = """Project: {slug}
-README says: {readme}
-Stack detected: {stack}
-Top dirs: {dirs}
+    for f in cwd.iterdir():
+        if not f.is_file():
+            continue
+        name = f.name
 
-Respond with this JSON only:
-{{"description": "one sentence: what this project does", "entry_point": "command to run this"}}"""
+        if name in (".env", ".env.local", ".env.development",
+                   ".env.production", ".env.example", ".env.template"):
+            results["env_files"].append(name)
+        elif name in ("docker-compose.yml", "docker-compose.yaml",
+                     "docker-compose.override.yml"):
+            results["config_files"].append(name)
+        elif name in (" Makefile", "pytest.ini", ".editorconfig",
+                     "tsconfig.json", "jsconfig.json", "pyrightconfig.json"):
+            results["config_files"].append(name)
+
+    return results
 
 
-def _llm_describe_project(cwd: Path, slug: str, readme: str, stack: list, dirs: list) -> dict | None:
-    """Ask the Qwen 0.5B model for a project description.
+# ── Mindmap builder (replaces build_compact_context) ────────────────────────
 
-    Ultra-simple 2-field prompt — this model can't handle complex prompts.
-    The filesystem detection + README do 90% of the work.
+def build_initial_mindmap(cwd: Path, slug: str, project_dir: Path) -> dict:
+    """Build initial mindmap from project filesystem.
+
+    Args:
+        cwd: Current working directory (project root)
+        slug: Project slug
+        project_dir: Path to save mindmap.json
+
+    Returns:
+        Assembled mindmap dict (caller should save it).
     """
-    if not get_model_path().exists():
-        return None
+    stack_info = detect_project_stack(cwd)
+    readme_desc = read_readme_description(cwd)
 
-    try:
-        from llama_cpp import Llama
-    except ImportError:
-        return None
+    mindmap = build_initial_mindmap_from_stack(cwd, slug, stack_info)
 
-    try:
-        from utils import get_llm
-        llm = get_llm()
-        if llm is None:
-            return None
+    if readme_desc and "project_overview" in mindmap["nodes"]:
+        existing = mindmap["nodes"]["project_overview"]
+        existing["content"] = readme_desc
+        existing["last_updated"] = datetime.now().strftime("%Y-%m-%d")
+        existing_keywords = set(existing.get("keywords", []))
+        existing_keywords.update([slug.lower(), "project", "overview"])
+        existing["keywords"] = list(existing_keywords)
 
-        prompt = _LLM_PROMPT.format(
-            slug=slug,
-            readme=readme[:300] if readme else "(no README)",
-            stack=", ".join(stack) if stack else "unknown",
-            dirs=", ".join(dirs[:8]),
+    save_mindmap(project_dir, mindmap)
+    _debug(f"Created initial mindmap.json for {slug}")
+
+    return mindmap
+
+
+# ── Mindmap update after session ─────────────────────────────────────────────
+
+def update_mindmap_after_session(
+    project_dir: Path,
+    session_summary: dict,
+    changed_files: list[str],
+) -> None:
+    """Update mindmap with learnings from a completed session.
+
+    Args:
+        project_dir: Path to project directory with mindmap.json
+        session_summary: Dict with keys: summary, next_steps, keywords,
+                        decisions, files_and_roles
+        changed_files: List of file paths that were modified
+    """
+    mindmap = load_mindmap(project_dir)
+
+    files_and_roles = session_summary.get("files_and_roles", {})
+    for filepath, role in files_and_roles.items():
+        parent_dir = str(Path(filepath).parent)
+        if parent_dir == ".":
+            parent_dir = "root"
+        node_id = parent_dir.replace("/", "_").replace("\\", "_").replace(".", "_")
+
+        content = f"{filepath}: {role}"
+        upsert_node(
+            mindmap,
+            node_id=node_id,
+            content=content,
+            keywords=session_summary.get("keywords", []),
+            parent="project_overview",
+            files=[filepath],
         )
 
-        response = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": _LLM_SYSTEM},
-                {"role": "user",   "content": prompt},
-            ],
-            max_tokens=128,
-            temperature=0.05,
-        )
-
-        # Handle different response formats from llama-cpp-python
-        choice = response["choices"][0]
-        msg = choice.get("message", choice)
-        if isinstance(msg, str):
-            raw = msg.strip()
-        elif isinstance(msg, dict):
-            raw = (msg.get("content") or "").strip()
+    decisions = session_summary.get("decisions", [])
+    if decisions:
+        existing = mindmap["nodes"].get("architecture", {})
+        existing_content = existing.get("content", "")
+        if existing_content:
+            new_content = existing_content + " | " + " | ".join(decisions[:3])
         else:
-            return None
+            new_content = " | ".join(decisions[:3])
+        upsert_node(
+            mindmap,
+            node_id="architecture",
+            content=new_content,
+            keywords=["architecture", "decisions"],
+            parent="project_overview",
+        )
 
-        # Strip markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
+    keywords = session_summary.get("keywords", [])
+    if keywords:
+        project_overview = mindmap["nodes"].get("project_overview", {})
+        existing_kw = set(project_overview.get("keywords", []))
+        existing_kw.update(k.lower() for k in keywords)
+        if project_overview:
+            project_overview["keywords"] = list(existing_kw)
+            project_overview["last_updated"] = datetime.now().strftime("%Y-%m-%d")
 
-        result = json.loads(raw.strip())
-        # Validate
-        if not isinstance(result.get("description"), str):
-            return None
-        # Reject if it echoes the prompt
-        if "one sentence" in result["description"].lower():
-            return None
+    stale_ids = mark_files_stale(mindmap, changed_files)
 
-        return result
+    if stale_ids:
+        project_context = _build_project_context(mindmap)
+        for node_id in stale_ids:
+            node_data = mindmap["nodes"].get(node_id, {})
+            if node_data:
+                updated_content = summarize_stale_node(node_id, node_data, project_context)
+                if updated_content and updated_content != node_data.get("content"):
+                    node_data["content"] = updated_content
+                    node_data["last_updated"] = datetime.now().strftime("%Y-%m-%d")
+                    node_data["stale"] = False
+
+    save_mindmap(project_dir, mindmap)
+    _debug(f"Updated mindmap.json with session learnings")
+
+
+def _build_project_context(mindmap: dict) -> str:
+    """Build a brief project context string for LLM."""
+    overview = mindmap["nodes"].get("project_overview", {})
+    content = overview.get("content", "")[:200]
+
+    stack = mindmap["nodes"].get("stack", {})
+    stack_content = stack.get("content", "")[:100]
+
+    return f"Project: {content} Stack: {stack_content}"
+
+
+def summarize_stale_node(node_id: str, node_data: dict, project_context: str) -> str:
+    """Re-summarize a stale node using Claude API (Anthropic or NVIDIA NIM).
+
+    Args:
+        node_id: ID of the node to summarize
+        node_data: Current node data dict
+        project_context: Brief project context string
+
+    Returns:
+        Updated content string, or original on failure.
+        If no API available, returns node_data["content"] unchanged.
+    """
+    if not llm_available():
+        return node_data.get("content", "")
+
+    try:
+        current_content = node_data.get("content", "")
+        files_changed = node_data.get("files", [])
+
+        system_prompt = "You are a developer context updater. Respond with only the updated description, no explanation."
+        user_prompt = f"""Given this context about a project: {project_context}
+Update this node's description in 1-2 sentences: {current_content}
+Recent files changed: {files_changed}
+
+Respond with only the updated description, no explanation."""
+
+        if is_nvidia_nim():
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                base_url=os.environ.get("NVIDIA_NIM_BASE_URL"),
+            )
+            response = client.chat.completions.create(
+                model="claude-3-5-haiku-20241022",
+                max_tokens=100,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+            )
+            updated = response.choices[0].message.content.strip()
+        else:
+            import anthropic
+            client = anthropic.Anthropic()
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=100,
+                temperature=0,
+                system=[{"type": "text", "text": system_prompt}],
+                messages=[{"type": "user", "text": user_prompt}],
+            )
+            updated = response.content[0].text.strip()
+
+        if len(updated) > 5 and "given this context" not in updated.lower():
+            return updated
+
+        return node_data.get("content", "")
 
     except Exception as e:
-        _debug(f"LLM describe failed: {e}")
-        return None
+        _debug(f"summarize_stale_node error: {e}")
+        return node_data.get("content", "")
 
 
-# ── Compact context builder ──────────────────────────────────────────────────
+# ── Context check (updated for mindmap) ─────────────────────────────────────
+
+def is_context_empty_or_missing(project_dir: Path) -> bool:
+    """Check if mindmap.json needs to be (re)generated."""
+    mindmap_path = project_dir / "mindmap.json"
+    if not mindmap_path.exists():
+        return True
+    try:
+        data = json.loads(mindmap_path.read_text())
+        return len(data.get("nodes", {})) == 0
+    except Exception:
+        return True
+
+
+# ── Legacy context functions (kept for compatibility) ────────────────────────
 
 def build_compact_context(cwd: Path, slug: str) -> str:
-    """Build a compact, high-signal context.md for a project.
+    """Legacy function — returns empty string (use build_initial_mindmap instead)."""
+    return ""
 
-    Target: < 60 lines, < 1500 tokens. Every line must be useful to Claude.
-
-    Priority order for project description:
-    1. LLM analysis of README + filesystem
-    2. First paragraph of README.md
-    3. Filesystem detection fallback
-    """
-    fs = detect_project_stack(cwd)
-    readme_desc = read_readme_description(cwd)
-    stack = fs.get("stack", [])
-
-    # Top-level directories
-    try:
-        dirs = [e.name for e in sorted(cwd.iterdir())
-                if e.is_dir() and not e.name.startswith(".")][:10]
-    except Exception:
-        dirs = []
-
-    # Try LLM for description
-    llm_ctx = _llm_describe_project(cwd, slug, readme_desc, stack, dirs)
-
-    # Build description — priority: README > LLM > detected type
-    if readme_desc:
-        description = readme_desc
-    elif llm_ctx and llm_ctx.get("description"):
-        description = llm_ctx["description"]
-    elif fs.get("type") == "claude-skill":
-        # Pre-fill from SKILL.md auto markers if available
-        skill_md_path = cwd / "SKILL.md"
-        if skill_md_path.exists():
-            skill_text = skill_md_path.read_text(encoding="utf-8")
-            desc_match = re.search(
-                r'<!-- auto:what_this_is:start -->\s*(.+?)\s*<!-- auto:what_this_is:end -->',
-                skill_text, re.DOTALL
-            )
-            if desc_match:
-                description = desc_match.group(1).strip()
-            else:
-                description = f"Claude Code skill — {fs.get('name', slug)}"
-        else:
-            description = f"Claude Code skill — {fs.get('name', slug)}"
-    elif fs.get("name"):
-        type_labels = {
-            "node": "Node.js project", "python": "Python project",
-            "rust": "Rust project", "go": "Go project",
-            "flutter": "Flutter project", "claude-skill": "Claude Code Skill",
-        }
-        label = type_labels.get(fs.get("type", ""), "project")
-        description = f"{fs['name']} — {label}"
-    else:
-        description = slug
-
-    # Stack string
-    stack_str = " · ".join(stack) if stack else "Not detected"
-
-    # Entry point
-    entry_point = ""
-    if llm_ctx and llm_ctx.get("entry_point"):
-        entry_point = llm_ctx["entry_point"]
-    elif fs.get("scripts"):
-        if "dev" in fs["scripts"]:
-            entry_point = "npm run dev"
-        elif "start" in fs["scripts"]:
-            entry_point = "npm start"
-    elif fs.get("type") == "python":
-        entry_point = "python3 main.py"
-    elif fs.get("type") == "flutter":
-        entry_point = "flutter run"
-    elif fs.get("type") == "rust":
-        entry_point = "cargo run"
-    elif fs.get("type") == "go":
-        entry_point = "go run ."
-
-    # Key files — compact list with purpose
-    key_files = _build_key_files(cwd, fs)
-
-    # Environment
-    env_parts = []
-    if fs.get("git_branch"):
-        env_parts.append(f"Git: {fs['git_branch']}")
-    if fs.get("recent_commits"):
-        env_parts.append(f"Last commit: {fs['recent_commits'][0]}")
-    if fs.get("env_keys"):
-        env_parts.append(f"Env vars: {', '.join(fs['env_keys'][:8])}")
-    env_str = " | ".join(env_parts) if env_parts else "Not detected"
-
-    # Build compact context
-    parts = [
-        f"---",
-        f"project: {slug}",
-        f"directory: {cwd}",
-        f"created: {datetime.now().strftime('%Y-%m-%d')}",
-        f"tags: [claude-recall, context]",
-        f"---",
-        f"",
-        f"# {slug}",
-        f"",
-        f"<!-- auto:what_this_is:start -->",
-        f"{description}",
-        f"<!-- auto:what_this_is:end -->",
-        f"",
-        f"## Stack",
-        f"<!-- auto:stack:start -->",
-        f"{stack_str}",
-        f"<!-- auto:stack:end -->",
-    ]
-
-    # Entry point (only if detected)
-    if entry_point:
-        parts.extend([
-            f"",
-            f"## Run",
-            f"<!-- auto:entry_point:start -->",
-            f"`{entry_point}`",
-            f"<!-- auto:entry_point:end -->",
-        ])
-
-    # Key files
-    if key_files:
-        parts.extend([
-            f"",
-            f"## Key Files",
-            f"<!-- auto:key_files:start -->",
-            key_files,
-            f"<!-- auto:key_files:end -->",
-        ])
-
-    # Current state + Architecture + Gotchas (empty on first create)
-    parts.extend([
-        f"",
-        f"## Current State",
-        f"<!-- auto:current_state:start -->",
-        f"First session — no history yet",
-        f"<!-- auto:current_state:end -->",
-        f"",
-        f"## Decisions",
-        f"<!-- auto:decisions:start -->",
-        f"<!-- auto:decisions:end -->",
-        f"",
-        f"## Gotchas",
-        f"<!-- auto:gotchas:start -->",
-        f"<!-- auto:gotchas:end -->",
-        f"",
-        f"## Environment",
-        f"<!-- auto:environment:start -->",
-        f"{env_str}",
-        f"<!-- auto:environment:end -->",
-        f"",
-    ])
-
-    return "\n".join(parts)
-
-
-def _build_key_files(cwd: Path, fs: dict) -> str:
-    """Build a compact key files section based on filesystem detection."""
-    files = []
-
-    # Common important files and their purposes
-    file_purposes = {
-        "package.json": "Node.js dependencies and scripts",
-        "tsconfig.json": "TypeScript configuration",
-        "pubspec.yaml": "Flutter/Dart dependencies",
-        "Cargo.toml": "Rust dependencies",
-        "go.mod": "Go module definition",
-        "requirements.txt": "Python dependencies",
-        "pyproject.toml": "Python project configuration",
-        "Dockerfile": "Container build definition",
-        "docker-compose.yml": "Multi-container orchestration",
-        "docker-compose.yaml": "Multi-container orchestration",
-        "Makefile": "Build automation",
-        "SKILL.md": "Claude Code skill definition",
-    }
-
-    for config_file in fs.get("config_files", []):
-        purpose = file_purposes.get(config_file, "configuration")
-        files.append(f"- `{config_file}` — {purpose}")
-
-    # Add entry points based on project type
-    if fs.get("type") == "node":
-        for f in ["src/index.ts", "src/app.ts", "pages/index.tsx",
-                   "app/page.tsx", "src/main.ts", "index.js"]:
-            if (cwd / f).exists():
-                files.append(f"- `{f}` — entry point")
-                break
-    elif fs.get("type") == "python":
-        for f in ["main.py", "app.py", "manage.py", "src/main.py"]:
-            if (cwd / f).exists():
-                files.append(f"- `{f}` — entry point")
-                break
-
-    return "\n".join(files[:10]) if files else ""
-
-
-# ── Context update (post-session) ────────────────────────────────────────────
 
 def update_context_after_session(
     project_dir: Path,
@@ -430,217 +377,5 @@ def update_context_after_session(
     session_summary: str | None = None,
     all_prompts: list[str] | None = None,
 ) -> None:
-    """Update context.md with learnings from a completed session.
-
-    Only updates auto-marker sections. User content outside markers is preserved.
-    After marker updates, runs an LLM enrichment pass to extract decisions/gotchas.
-    """
-    context_md = project_dir / "context.md"
-    if not context_md.exists():
-        # Generate fresh if missing
-        content = build_compact_context(cwd, slug)
-        context_md.write_text(content, encoding="utf-8")
-        _debug(f"Created fresh context.md for {slug}")
-        return
-
-    existing = context_md.read_text(encoding="utf-8")
-    updated = existing
-
-    # Update current state
-    if current_state:
-        updated = merge_auto_section(updated, "current_state", current_state)
-
-    # Update stack from filesystem (always fresh)
-    fs = detect_project_stack(cwd)
-    stack = fs.get("stack", [])
-    if stack:
-        updated = merge_auto_section(updated, "stack", " · ".join(stack))
-
-    # Merge decisions (accumulate, don't replace)
-    if decisions:
-        existing_decisions = _extract_auto_section(updated, "decisions")
-        all_decisions = _merge_list_items(existing_decisions, decisions)
-        if all_decisions:
-            updated = merge_auto_section(updated, "decisions", all_decisions)
-
-    # Merge gotchas (accumulate, don't replace)
-    if gotchas:
-        existing_gotchas = _extract_auto_section(updated, "gotchas")
-        all_gotchas = _merge_list_items(existing_gotchas, gotchas)
-        if all_gotchas:
-            updated = merge_auto_section(updated, "gotchas", all_gotchas)
-
-    # Update key files if provided
-    if key_files_update:
-        files_str = "\n".join(f"- `{f}`" for f in key_files_update[:10])
-        updated = merge_auto_section(updated, "key_files", files_str)
-
-    # Update environment
-    env_parts = []
-    if fs.get("git_branch"):
-        env_parts.append(f"Git: {fs['git_branch']}")
-    if fs.get("recent_commits"):
-        env_parts.append(f"Last commit: {fs['recent_commits'][0]}")
-    if env_parts:
-        updated = merge_auto_section(updated, "environment", " | ".join(env_parts))
-
-    # LLM enrichment pass — extract decisions/gotchas from session content
-    if session_summary and all_prompts and len(all_prompts) >= 2:
-        enriched = _llm_enrich_context(updated, session_summary, all_prompts)
-        if enriched:
-            if enriched.get("decisions"):
-                existing_dec = _extract_auto_section(updated, "decisions")
-                merged_dec = _merge_list_items(existing_dec, enriched["decisions"])
-                if merged_dec:
-                    updated = merge_auto_section(updated, "decisions", merged_dec)
-            if enriched.get("gotchas"):
-                existing_got = _extract_auto_section(updated, "gotchas")
-                merged_got = _merge_list_items(existing_got, enriched["gotchas"])
-                if merged_got:
-                    updated = merge_auto_section(updated, "gotchas", merged_got)
-
-    if updated != existing:
-        context_md.write_text(updated, encoding="utf-8")
-        _debug("context.md updated with session learnings")
-
-
-_ENRICH_SYSTEM = "You extract key learnings from coding sessions. Respond ONLY as JSON."
-
-_ENRICH_PROMPT = """Session summary: {summary}
-
-User discussed: {prompts}
-
-From this session, extract any:
-1. Architecture/design decisions made
-2. Important gotchas or warnings discovered
-
-Respond as JSON:
-{{"decisions": ["<decision1>", "<decision2>"], "gotchas": ["<gotcha1>"]}}
-
-If none found, respond: {{"decisions": [], "gotchas": []}}"""
-
-
-def _llm_enrich_context(
-    existing_context: str,
-    session_summary: str,
-    all_prompts: list[str],
-) -> dict | None:
-    """Ask the LLM to extract decisions and gotchas from the session.
-
-    Returns dict with 'decisions' and 'gotchas' lists, or None if failed.
-    """
-    try:
-        from utils import get_llm, get_model_path
-        if not get_model_path().exists():
-            return None
-
-        llm = get_llm()
-        if llm is None:
-            return None
-
-        prompts_str = " | ".join(p[:100] for p in all_prompts[:5])
-
-        prompt = _ENRICH_PROMPT.format(
-            summary=session_summary[:300],
-            prompts=prompts_str,
-        )
-
-        response = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": _ENRICH_SYSTEM},
-                {"role": "user",   "content": prompt},
-            ],
-            max_tokens=200,
-            temperature=0.1,
-        )
-
-        choice = response["choices"][0]
-        msg = choice.get("message", choice)
-        raw = (msg.get("content") or "").strip() if isinstance(msg, dict) else str(msg).strip()
-
-        # Strip markdown fences
-        if raw.startswith("```"):
-            raw = raw.split("```")[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-            raw = raw.strip()
-
-        result = json.loads(raw)
-
-        # Validate structure
-        decisions = result.get("decisions", [])
-        gotchas = result.get("gotchas", [])
-
-        if not isinstance(decisions, list):
-            decisions = []
-        if not isinstance(gotchas, list):
-            gotchas = []
-
-        # Filter out prompt echoes and too-short items
-        clean_decisions = [d for d in decisions
-                         if isinstance(d, str) and len(d) > 10
-                         and "decision1" not in d.lower()
-                         and "<" not in d]
-        clean_gotchas = [g for g in gotchas
-                        if isinstance(g, str) and len(g) > 10
-                        and "gotcha1" not in g.lower()
-                        and "<" not in g]
-
-        if clean_decisions or clean_gotchas:
-            _debug(f"LLM enrichment: {len(clean_decisions)} decisions, {len(clean_gotchas)} gotchas")
-            return {"decisions": clean_decisions[:5], "gotchas": clean_gotchas[:5]}
-
-        _debug("LLM enrichment: nothing extracted")
-        return None
-
-    except Exception as e:
-        _debug(f"LLM enrich error: {e}")
-        return None
-
-def _extract_auto_section(text: str, section_name: str) -> str:
-    """Extract content between auto markers for a section."""
-    pattern = re.compile(
-        r"<!-- auto:" + re.escape(section_name) + r":start -->\s*\n"
-        r"(.*?)\n\s*<!-- auto:" + re.escape(section_name) + r":end -->",
-        re.DOTALL
-    )
-    m = pattern.search(text)
-    return m.group(1).strip() if m else ""
-
-
-def _merge_list_items(existing: str, new_items: list[str]) -> str:
-    """Merge new bullet items into existing list, avoiding duplicates."""
-    # Parse existing items
-    existing_items = []
-    for line in existing.splitlines():
-        line = line.strip()
-        if line.startswith("- "):
-            existing_items.append(line[2:].strip())
-
-    # Add new items (deduplicate by lowercased text)
-    seen = {item.lower() for item in existing_items}
-    for item in new_items:
-        if item.lower() not in seen:
-            existing_items.append(item)
-            seen.add(item.lower())
-
-    # Keep max 8 items (most recent win)
-    items = existing_items[-8:]
-    return "\n".join(f"- {item}" for item in items) if items else ""
-
-
-def is_context_empty_or_missing(project_dir: Path) -> bool:
-    """Check if context.md needs to be (re)generated."""
-    context_md = project_dir / "context.md"
-    if not context_md.exists():
-        return True
-
-    text = context_md.read_text(encoding="utf-8")
-
-    # Strip frontmatter + auto markers + HTML comments
-    body = re.sub(r"^---.*?---\s*", "", text, flags=re.DOTALL).strip()
-    body = re.sub(r"<!--.*?-->", "", body, flags=re.DOTALL)
-    body = body.strip()
-
-    # If less than 20 chars of actual content, it's empty
-    return len(body) < 20
+    """Legacy function — no-op (use update_mindmap_after_session instead)."""
+    pass

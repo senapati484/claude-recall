@@ -183,6 +183,11 @@ def get_cwd(hook_input: dict) -> Path:
     return Path(hook_input.get("cwd") or os.getcwd())
 
 
+def get_current_prompt(hook_input: dict) -> str:
+    """Extract the user's current prompt text from hook input."""
+    return hook_input.get("prompt", "").strip()
+
+
 def now_str(fmt: str = "%Y-%m-%d_%H-%M") -> str:
     return datetime.now().strftime(fmt)
 
@@ -197,94 +202,51 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
     return text[:cut] + "\n\n[claude-recall: truncated]"
 
 
-# ── LLM singleton ────────────────────────────────────────────────────────────
-
-_llm_instance = None
-_llm_load_attempted = False
-
-
-def get_model_path() -> Path:
-    """Return path to the local Qwen GGUF model file."""
-    return Path.home() / ".claude" / "models" / "qwen2.5-0.5b-instruct-q4_k_m.gguf"
-
+# ── Claude API ───────────────────────────────────────────────────────────────
 
 def llm_available() -> bool:
-    """True if both llama-cpp-python is importable AND the model file exists."""
-    if not get_model_path().exists():
-        return False
-    try:
-        import llama_cpp  # noqa: F401
-        return True
-    except ImportError:
-        return False
-
-
-def get_llm():
-    """Return a cached Llama instance, or None if unavailable.
-
-    Loads the model only ONCE per process. Subsequent calls return the
-    same instance. This avoids the 5-10s startup penalty of loading
-    380MB into memory on every LLM call.
-    """
-    global _llm_instance, _llm_load_attempted
-
-    if _llm_load_attempted:
-        return _llm_instance
-
-    _llm_load_attempted = True
-
-    if not llm_available():
-        debug_log("get_llm: LLM not available")
-        return None
-
-    try:
-        from llama_cpp import Llama
-
-        _llm_instance = Llama(
-            model_path=str(get_model_path()),
-            n_ctx=4096,
-            n_threads=4,
-            n_gpu_layers=0,
-            verbose=False,
-        )
-        debug_log("get_llm: Llama instance created OK")
-        return _llm_instance
-
-    except Exception as e:
-        debug_log(f"get_llm: failed to create Llama instance: {e}")
-        return None
-
-
-def ensure_model(silent: bool = False) -> bool:
-    """Ensure the Qwen GGUF model is available. Auto-downloads if missing."""
-    model_path = get_model_path()
-    if model_path.exists():
-        return True
-
-    MODEL_URL = (
-        "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF"
-        "/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-    )
-    model_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not silent:
-        print(
-            "[claude-recall] LLM model not found — downloading ~380 MB from HuggingFace...",
-            file=sys.stderr,
-        )
-
-    try:
-        import urllib.request
-        urllib.request.urlretrieve(MODEL_URL, str(model_path))
-        if model_path.exists():
-            if not silent:
-                print(f"[claude-recall] Model saved → {model_path}", file=sys.stderr)
+    """Check if Claude API is available (Anthropic or NVIDIA NIM)."""
+    # Check Anthropic first
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic
             return True
-    except Exception as e:
-        if not silent:
-            print(f"[claude-recall] Model download failed: {e}", file=sys.stderr)
-
+        except ImportError:
+            pass
+    # Check NVIDIA NIM (OpenAI-compatible)
+    if os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"):
+        return True
     return False
+
+
+def get_anthropic_client():
+    """Get Anthropic client or OpenAI client for NVIDIA NIM. Returns None if unavailable."""
+    # Try Anthropic first
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic
+            return anthropic.Anthropic()
+        except Exception:
+            pass
+    
+    # Try NVIDIA NIM (OpenAI-compatible)
+    if os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"):
+        try:
+            from openai import OpenAI
+            client = OpenAI(
+                api_key=os.environ.get("OPENAI_API_KEY"),
+                base_url=os.environ.get("NVIDIA_NIM_BASE_URL"),
+            )
+            return client
+        except Exception:
+            pass
+    
+    return None
+
+
+def is_nvidia_nim() -> bool:
+    """Check if using NVIDIA NIM instead of Anthropic."""
+    return bool(os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"))
 
 
 # ── File filtering ────────────────────────────────────────────────────────────

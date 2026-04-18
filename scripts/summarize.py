@@ -1,72 +1,51 @@
 """
-summarize.py — Local LLM session summariser for claude-recall.
+summarize.py — Session summariser for claude-recall.
 
-Uses Qwen2.5 0.5B GGUF via llama-cpp-python to generate a structured
-summary from a session transcript.
+Uses Claude API (Anthropic or NVIDIA NIM) to generate structured summary
+from session transcript. Falls back to regex if API unavailable.
 
-DESIGN: Qwen 0.5B is a very small model (490M params). We pre-extract
-facts with regex, then ask the LLM to ONLY rephrase/clean them into a
-readable summary. This avoids the model echoing prompt templates or
-hallucinating content.
-
-Called by save_context.py after every session. If the model is unavailable,
-returns None and save_context.py uses regex-based facts as fallback.
+Supports:
+- Anthropic: ANTHROPIC_API_KEY
+- NVIDIA NIM: OPENAI_API_KEY + NVIDIA_NIM_BASE_URL
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-from utils import get_model_path, llm_available, get_llm, DEBUG_LOG
 
-from datetime import datetime
+def llm_available() -> bool:
+    """Check if Claude API is available (Anthropic or NVIDIA NIM)."""
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        return True
+    if os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"):
+        return True
+    return False
+
+
+def is_nvidia_nim() -> bool:
+    """Check if using NVIDIA NIM."""
+    return bool(os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"))
+
 
 def _debug(msg: str) -> None:
+    """Write debug message to log file."""
+    from datetime import datetime
     try:
-        with open(DEBUG_LOG, "a") as f:
+        log_path = Path.home() / ".claude-recall" / "debug.log"
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] SUMMARIZE: {msg}\n")
     except Exception:
         pass
 
 
-# PROMPT DESIGN NOTE:
-# Qwen 0.5B (490M params) has a strong tendency to copy/echo example text.
-# We CANNOT use few-shot examples — it will copy them verbatim.
-# Instead: feed the extracted facts directly and ask for a clean-up rewrite.
-_SYSTEM_ONE_SHOT = "Extract structured facts from this developer conversation. Output only JSON."
-
-_USER_ONE_SHOT = """Example:
-User: Add JWT auth to Express routes
-Claude: Added verifyToken middleware to protect /api/user and /api/orders endpoints.
-
-Output: {{"summary": "Added JWT middleware to Express routes, protecting auth endpoints", "next_steps": ["Add refresh token rotation", "Write auth middleware tests"], "keywords": ["jwt", "auth", "express", "middleware"], "decisions": ["Chose HS256 for speed over RS256"], "files_and_roles": {{"middleware/auth.js": "JWT verifyToken middleware", "routes/user.js": "Protected user routes"}}}}
-
----
-Now extract facts from this conversation:
-{conversation}
-
-Output JSON only:"""
-
-
-# Legacy constants (kept for compatibility during transition)
-_SYSTEM = _SYSTEM_ONE_SHOT
-_PROMPT = _USER_ONE_SHOT
-
-
 def clean_transcript(messages: list[dict]) -> list[dict]:
-    """Remove noise from messages before LLM summarization.
-
-    - Drops non-user/assistant roles
-    - Drops tool-use blocks (content as list)
-    - Drops assistant preambles ("I'll", "Let me", etc.)
-    - Truncates user to 200 chars
-    - Keeps only last sentence of assistant, max 300 chars
-    - Keeps max 8 messages total
-    """
+    """Remove noise from messages before LLM summarization."""
     PREAMBLES = ("i'll", "let me", "i will", "sure", "of course",
                  "i'd be happy", "i can help", "i'm going to", "here's")
 
@@ -75,11 +54,9 @@ def clean_transcript(messages: list[dict]) -> list[dict]:
         role = m.get("role", "")
         content = m.get("content", "")
 
-        # Skip non-human roles
         if role not in ("user", "assistant"):
             continue
 
-        # Skip tool blocks
         if isinstance(content, list):
             continue
 
@@ -88,10 +65,8 @@ def clean_transcript(messages: list[dict]) -> list[dict]:
             continue
 
         if role == "user":
-            # Keep full user prompt, truncate to 200
             cleaned.append({"role": "user", "content": text[:200]})
         else:
-            # Drop preambles — extract last meaningful sentence
             lower = text.lower()
             if any(lower.startswith(p) for p in PREAMBLES):
                 for sep in (". ", ": ", "\n"):
@@ -100,48 +75,85 @@ def clean_transcript(messages: list[dict]) -> list[dict]:
                         text = text[idx + len(sep):]
                         break
 
-            # Keep last sentence, max 300 chars
             sentences = text.rsplit(". ", 1)
             last = sentences[-1] if len(sentences) > 1 else text
             last = last[:300].strip()
             if last:
                 cleaned.append({"role": "assistant", "content": last})
 
-    # Keep only last 8 messages
     return cleaned[-8:]
 
 
+def _call_anthropic(system_prompt: str, user_prompt: str) -> str | None:
+    """Call Anthropic API."""
+    try:
+        import anthropic
+    except ImportError:
+        return None
+    
+    try:
+        client = anthropic.Anthropic()
+        response = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=400,
+            temperature=0,
+            system=[{"type": "text", "text": system_prompt}],
+            messages=[{"type": "user", "text": user_prompt}],
+        )
+        return response.content[0].text.strip()
+    except Exception as e:
+        _debug(f"Anthropic API error: {e}")
+        return None
+
+
+def _call_nvidia_nim(system_prompt: str, user_prompt: str) -> str | None:
+    """Call NVIDIA NIM (OpenAI-compatible)."""
+    try:
+        from openai import OpenAI
+    except ImportError:
+        return None
+    
+    try:
+        client = OpenAI(
+            api_key=os.environ.get("OPENAI_API_KEY"),
+            base_url=os.environ.get("NVIDIA_NIM_BASE_URL"),
+        )
+        response = client.chat.completions.create(
+            model="claude-3-5-haiku-20241022",
+            max_tokens=400,
+            temperature=0,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        _debug(f"NVIDIA NIM API error: {e}")
+        return None
+
+
 def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | None:
-    """Generate a structured session summary using the local Qwen model.
+    """Generate a structured session summary using Claude API.
 
-    Args:
-        messages: list of {role, content} dicts from transcript
-        facts: pre-extracted facts dict (first_prompt, files, turns, etc.)
-              If provided, the LLM just rephrases the facts.
-              If not provided, extracts from messages.
-
-    Returns dict with keys: summary, next_steps, keywords
+    Returns dict with keys: summary, next_steps, keywords, decisions, files_and_roles
     Or None if model unavailable or fails.
     """
     if not llm_available():
         return None
 
     try:
-        # Pre-clean the transcript before LLM sees it
         messages = clean_transcript(messages)
 
-        llm = get_llm()
-        if llm is None:
-            return None
-
-        # Pre-extract facts if not provided
         if facts is None:
             facts = _quick_extract(messages)
 
+        first_prompt = facts.get("first_prompt", "")
         files = facts.get("files", [])
         files_str = ", ".join(files[:8]) if files else "none"
 
-        # Build actual conversation log for the LLM
+        tool_counts = facts.get("tool_counts", {})
+
         conv_lines = []
         all_prompts = facts.get("all_prompts", [])
         all_responses = facts.get("all_responses", [])
@@ -151,7 +163,6 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
                 if i < len(all_responses) and all_responses[i]:
                     conv_lines.append(f"Assistant: {all_responses[i][:100]}")
         else:
-            # Fallback: extract from raw messages
             for m in messages[:12]:
                 role = m.get('role', '')
                 content = m.get('content', '')
@@ -160,31 +171,35 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
 
         conversation = "\n".join(conv_lines) if conv_lines else "(empty session)"
 
-        # Build the conversation-aware prompt (one-shot format)
-        prompt = _USER_ONE_SHOT.format(conversation=conversation)
+        system_prompt = "You are a developer session summarizer. Extract structured facts from the conversation and output ONLY valid JSON. No markdown fences, no explanation."
 
-        response = llm.create_chat_completion(
-            messages=[
-                {"role": "system", "content": _SYSTEM_ONE_SHOT},
-                {"role": "user",   "content": prompt},
-            ],
-            max_tokens=300,
-            temperature=0.1,
-        )
+        user_prompt = f"""Session facts:
+- First prompt: {first_prompt}
+- Files mentioned: {files_str}
+- Tool usage: {tool_counts}
 
-        # Handle different response formats from llama-cpp-python
-        choice = response["choices"][0]
-        msg = choice.get("message", choice)
-        if isinstance(msg, str):
-            raw = msg.strip()
-        elif isinstance(msg, dict):
-            raw = (msg.get("content") or "").strip()
+Last 6 conversation turns:
+{conversation}
+
+Output JSON with these keys:
+- summary: 1-2 sentences of what was done
+- next_steps: list of strings
+- keywords: list of tech terms
+- decisions: list of architectural decisions made
+- files_and_roles: dict of filepath -> one-line purpose
+
+Output JSON only:"""
+
+        if is_nvidia_nim():
+            raw = _call_nvidia_nim(system_prompt, user_prompt)
         else:
+            raw = _call_anthropic(system_prompt, user_prompt)
+
+        if not raw:
             return None
 
         _debug(f"LLM raw output: {raw[:200]}")
 
-        # Strip markdown fences
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -192,18 +207,14 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
 
         raw = raw.strip()
 
-        # Try direct JSON parse first
         try:
             result = json.loads(raw)
         except json.JSONDecodeError:
-            # JSON repair for truncated output (common with small models)
             result = _repair_json(raw)
             if result is None:
                 _debug(f"JSON parse failed, repair also failed")
                 return None
 
-        # Normalize: ensure next_steps and keywords are always lists
-        # (Qwen 0.5B sometimes returns them as strings)
         for key in ("next_steps", "keywords", "decisions"):
             val = result.get(key)
             if isinstance(val, str) and val.strip():
@@ -211,17 +222,14 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
             elif not isinstance(val, list):
                 result[key] = []
 
-        # Ensure files_and_roles is always a dict
         if not isinstance(result.get("files_and_roles"), dict):
             result["files_and_roles"] = {}
 
-        # Validate — reject prompt echoes and hallucinations
         summary = result.get("summary", "")
         if not isinstance(summary, str) or len(summary) < 10:
             _debug("Rejected: summary too short")
             return None
 
-        # Reject if it echoes the prompt template
         echo_patterns = [
             "what was done in",
             "what to do next",
@@ -237,7 +245,6 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
             _debug(f"Rejected: prompt echo detected in summary: {summary[:80]}")
             return None
 
-        # Anti-hallucination: check that key nouns in summary appear in the transcript
         transcript_text = conversation.lower()
         summary_words = [w for w in re.findall(r'\b[a-z]{4,}\b', summary_lower)
                         if w not in {'with', 'from', 'that', 'this', 'they', 'were',
@@ -252,7 +259,6 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
                 _debug(f"Rejected: hallucination detected (match={match_ratio:.0%}): {summary[:80]}")
                 return None
 
-        # Ensure required keys
         result.setdefault("next_steps", [])
         result.setdefault("keywords", [])
         result.setdefault("decisions", [])
@@ -272,12 +278,9 @@ def generate_summary(messages: list[dict], facts: dict | None = None) -> dict | 
 
 def _quick_extract(messages: list[dict]) -> dict:
     """Quick regex extraction of facts from messages (no LLM needed)."""
-    import re
-
     user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
     all_text = " ".join(m.get("content", "") for m in messages if isinstance(m.get("content"), str))
 
-    # Files mentioned
     file_re = re.compile(
         r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
         r'md|json|yaml|yml|toml|sh|html|css|scss)\b'
@@ -292,14 +295,7 @@ def _quick_extract(messages: list[dict]) -> dict:
 
 
 def _repair_json(raw: str) -> dict | None:
-    """Try to extract a valid JSON object from truncated LLM output.
-
-    Common case: model generates valid JSON but it gets cut off at max_tokens.
-    We try to extract at least the "summary" field.
-    """
-    import re
-
-    # Try to extract summary field with regex
+    """Try to extract a valid JSON object from truncated LLM output."""
     summary_match = re.search(r'"summary"\s*:\s*"([^"]+)"', raw)
     if not summary_match:
         return None
@@ -308,9 +304,8 @@ def _repair_json(raw: str) -> dict | None:
     if len(summary) < 10:
         return None
 
-    result = {"summary": summary, "next_steps": [], "keywords": []}
+    result = {"summary": summary, "next_steps": [], "keywords": [], "decisions": [], "files_and_roles": {}}
 
-    # Try to extract next_steps (as array or string)
     steps_match = re.search(r'"next_steps"\s*:\s*\[([^\]]*)\]', raw)
     if steps_match:
         steps_raw = steps_match.group(1)
@@ -320,14 +315,12 @@ def _repair_json(raw: str) -> dict | None:
             if s.strip().strip('"').strip("'")
         ]
     else:
-        # Handle next_steps as a plain string
         steps_str = re.search(r'"next_steps"\s*:\s*"([^"]+)"', raw)
         if steps_str:
             result["next_steps"] = [
                 s.strip() for s in steps_str.group(1).split(",") if s.strip()
             ]
 
-    # Try to extract keywords
     kw_match = re.search(r'"keywords"\s*:\s*\[([^\]]*)\]', raw)
     if kw_match:
         kw_raw = kw_match.group(1)

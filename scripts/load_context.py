@@ -2,25 +2,24 @@
 """
 load_context.py — claude-recall UserPromptSubmit hook.
 
-Fires before every user prompt. On the FIRST prompt of a session:
-1. Loads project context from Obsidian vault
+Fires before every user prompt:
+1. Loads relevant context nodes from mindmap.json based on current prompt
 2. Injects last session summary for continuity
 3. Prints to stdout → Claude reads as system context
 
-Subsequent prompts in the same session are skipped (marker file).
 Never exits non-zero — a failed hook would block Claude from starting.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 import traceback
 import os
 from datetime import datetime
 from pathlib import Path
 
-# EARLY DIAGNOSTIC — log immediately to confirm hook is being called
 try:
     _log = Path.home() / ".claude" / "claude-recall-debug.log"
     with open(_log, "a") as _f:
@@ -39,8 +38,10 @@ from session_manager import (
     get_last_session_summary,
 )
 from context_builder import (
-    build_compact_context, is_context_empty_or_missing,
+    build_initial_mindmap, is_context_empty_or_missing,
 )
+
+from mindmap import load_mindmap, get_relevant_nodes, mindmap_to_context_md
 
 
 def _debug(msg: str) -> None:
@@ -51,6 +52,48 @@ def _debug(msg: str) -> None:
         pass
 
 
+def start_mcp_if_needed() -> None:
+    """Start MCP server process if not already running."""
+    import subprocess
+
+    pid_file = Path.home() / ".claude" / "claude-recall-mcp.pid"
+    script_path = Path(__file__).parent / "mcp_server.py"
+
+    if pid_file.exists():
+        try:
+            existing_pid = int(pid_file.read_text().strip())
+            try:
+                os.kill(existing_pid, 0)
+                _debug(f"MCP already running with PID {existing_pid}")
+                return
+            except (OSError, ProcessLookupError):
+                _debug(f"Stale PID file, removing")
+                pid_file.unlink()
+        except Exception:
+            pid_file.unlink()
+
+    try:
+        env = os.environ.copy()
+        slug_env_path = Path.home() / ".claude" / "claude-recall-slug.env"
+        if slug_env_path.exists():
+            for line in slug_env_path.read_text().splitlines():
+                if "=" in line:
+                    key, val = line.split("=", 1)
+                    env[key] = val
+
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path)],
+            env=env,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        pid_file.write_text(str(proc.pid))
+        _debug(f"Started MCP server with PID {proc.pid}")
+    except Exception as e:
+        _debug(f"Failed to start MCP server: {e}")
+
+
 def load_context() -> None:
     _debug("=== LOAD SESSION STARTED ===")
     _debug(f"CWD: {os.getcwd()}")
@@ -58,137 +101,79 @@ def load_context() -> None:
     try:
         hook_input = read_hook_input()
         session_id = hook_input.get("session_id", "unknown")
-        cwd        = get_cwd(hook_input)
-        cfg        = load_config()
+        cwd = get_cwd(hook_input)
+        cfg = load_config()
+        current_prompt = hook_input.get("prompt", "")
 
-        _debug(f"session_id={session_id}, cwd={cwd}")
+        _debug(f"session_id={session_id}, cwd={cwd}, prompt_len={len(current_prompt)}")
 
         cleanup_stale_markers()
 
-        # Session dedup — only load on first prompt
-        if not cfg.get("load_on_every_prompt", False):
+        if not cfg.get("load_on_every_prompt", True):
             if not should_load_context(session_id, cwd):
                 _debug("Skipping - marker exists (session already loaded)")
                 return
 
         mark_session_loaded(session_id, cwd)
 
-        # Resolve project in vault
-        slug        = cwd_to_slug(cwd)
+        slug = cwd_to_slug(cwd)
+
+        # Write slug to env file for MCP server
+        slug_env_path = Path.home() / ".claude" / "claude-recall-slug.env"
+        slug_env_path.write_text(f"CLAUDE_RECALL_SLUG={slug}\n")
+        _debug(f"Wrote slug env file: {slug_env_path}")
         project_dir = get_project_dir(cfg, slug)
-        context_md  = project_dir / "context.md"
+        mindmap_path = project_dir / "mindmap.json"
 
-        _debug(f"slug={slug}, project_dir={project_dir}, context exists={context_md.exists()}")
+        _debug(f"slug={slug}, project_dir={project_dir}")
 
-        # Auto-generate context.md if missing or empty
         if is_context_empty_or_missing(project_dir):
             try:
                 project_dir.mkdir(parents=True, exist_ok=True)
-                print(f"[claude-recall] ⚡ Generating context for '{slug}'...", file=sys.stderr)
-                content = build_compact_context(cwd, slug)
-                context_md.write_text(content, encoding="utf-8")
-                _debug(f"Auto-generated context.md ({len(content)} chars)")
-                print(f"[claude-recall] ✓ Context generated ({len(content)} chars)", file=sys.stderr)
+                print(f"[claude-recall] ⚡ Generating mindmap for '{slug}'...", file=sys.stderr)
+                mindmap = build_initial_mindmap(cwd, slug, project_dir)
+                _debug(f"Auto-generated mindmap.json ({len(mindmap.get('nodes', {}))} nodes)")
+                print(f"[claude-recall] ✓ Mindmap generated ({len(mindmap.get('nodes', {}))} nodes)", file=sys.stderr)
             except Exception as exc:
                 _debug(f"Auto-generate failed: {exc}")
                 print(f"[claude-recall] ✗ Auto-generate error: {exc}", file=sys.stderr)
 
-        # Build output for Claude
-        parts: list[str] = []
-        max_ctx = cfg.get("max_context_tokens", 2000)
+        mindmap = load_mindmap(project_dir)
 
-        # 1. Load context.md (60% of token budget)
-        if context_md.exists():
-            text = context_md.read_text(encoding="utf-8").strip()
-            if text:
-                text = truncate_to_tokens(text, int(max_ctx * 0.6))
-                parts.append(f"## Project context\n\n{text}")
+        if current_prompt:
+            relevant = get_relevant_nodes(mindmap, current_prompt, max_nodes=3)
+        else:
+            all_nodes = mindmap.get("nodes", {})
+            relevant = [{"node_id": k, **v} for k, v in all_nodes.items()][:2]
 
-        # 2. Last session summary for continuity (20% of budget)
+        _debug(f"Found {len(relevant)} relevant nodes")
+
+        context_lines = []
+        for node in relevant:
+            context_lines.append(f"### {node['node_id'].replace('_', ' ').title()}")
+            context_lines.append(node['content'])
+            if node.get('files'):
+                context_lines.append(f"Files: {', '.join(node['files'][:4])}")
+        context_text = "\n\n".join(context_lines)
+
+        max_ctx = cfg.get("max_context_tokens", 400)
+        context_text = truncate_to_tokens(context_text, max_ctx)
+
         last_summary = get_last_session_summary(project_dir)
         if last_summary:
             last_summary = truncate_to_tokens(last_summary, int(max_ctx * 0.2))
-            parts.append(f"## Previous session\n\n{last_summary}")
 
-        # 3. file-index.json (20% of budget, if exists)
-        file_index_path = project_dir / "file-index.json"
-        if file_index_path.exists():
-            try:
-                raw_index = json.loads(file_index_path.read_text(encoding="utf-8"))
-                raw_index.pop("_cache_mtimes", None)
-                if raw_index:
-                    lines = []
-                    for rel_path, info in list(raw_index.items())[:10]:
-                        if isinstance(info, dict) and info.get("purpose"):
-                            lines.append(f"- `{rel_path}` — {info['purpose']}")
-                    if lines:
-                        parts.append(
-                            "## Key files\n\n" + "\n".join(lines)
-                        )
-            except Exception:
-                pass
+        _debug(f"Returning {len(context_text)} chars of context")
 
-        if not parts:
-            _debug("No context found")
-            return
-
-        # Extract active task from most recent session's Next Steps
-        active_task = ""
-        try:
-            sessions_dir = project_dir / "sessions"
-            if sessions_dir.exists():
-                notes = sorted(sessions_dir.glob("*.md"), reverse=True)
-                if notes:
-                    latest = notes[0].read_text(encoding="utf-8")
-                    task_match = re.search(r"## Next Steps\s*\n- \[ \] (.+)", latest)
-                    if task_match:
-                        active_task = task_match.group(1).strip()
-                        if len(active_task) > 100:
-                            active_task = active_task[:100] + "..."
-        except Exception:
-            pass
-
-        # Label each section with semantic priority (case-insensitive prefix match)
-        labeled_parts = []
-        for part in parts:
-            plower = part.lower()
-            if plower.startswith("## project context"):
-                labeled_parts.append("[MUST KNOW]\n" + part)
-            elif plower.startswith("## previous session"):
-                labeled_parts.append("[RECENT WORK]\n" + part)
-            elif plower.startswith("## key files"):
-                labeled_parts.append("[KEY FILES]\n" + part)
-            else:
-                labeled_parts.append(part)
-
-        # Prepend active task if found
-        if active_task:
-            labeled_parts.insert(0, f"LAST SESSION ENDED WITH: {active_task}")
-
-        body = "\n\n---\n\n".join(labeled_parts)
-        body = truncate_to_tokens(body, max_ctx)
-
-        # Header
-        sessions_dir = project_dir / "sessions"
-        session_count = len([
-            f for f in sessions_dir.glob("*.md")
-            if not f.name.startswith(".")
-        ]) if sessions_dir.exists() else 0
-        header_parts = [f"Project: `{slug}`", f"Dir: `{cwd}`"]
-        if session_count > 0:
-            header_parts.append(f"Sessions: {session_count}")
-        header_parts.append(f"Loaded: {datetime.now().strftime('%H:%M')}")
-
-        _debug(f"Returning {len(body)} chars of context")
-
-        # Print to stdout — Claude reads this as system context
         print(
-            f"<!-- claude-recall: project memory loaded -->\n"
-            f"{' | '.join(header_parts)}\n\n"
-            + body
-            + "\n\n> **claude-recall active** — context auto-saves when you stop.\n"
+            f"<!-- claude-recall: {len(relevant)} relevant context nodes loaded -->\n"
+            f"Project: `{slug}` | Dir: `{cwd}` | Nodes: {len(mindmap.get('nodes', {}))}\n\n"
+            f"## Relevant Context\n\n{context_text}\n\n"
+            + (f"## Previous session\n\n{last_summary}\n\n" if last_summary else "")
+            + "> **claude-recall active** — use MCP tool `recall_get` for deeper context.\n"
         )
 
+        start_mcp_if_needed()
 
     except Exception as exc:
         _debug(f"ERROR: {exc}\n{traceback.format_exc()}")

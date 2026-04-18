@@ -8,9 +8,6 @@ RAW_URL="https://raw.githubusercontent.com/senapati484/claude-recall/main"
 INSTALL_DIR="$HOME/.claude/skills/claude-recall"
 SETTINGS="$HOME/.claude/settings.json"
 CONFIG="$HOME/.claude/claude-recall.json"
-MODEL_DIR="$HOME/.claude/models"
-MODEL_FILE="$MODEL_DIR/qwen2.5-0.5b-instruct-q4_k_m.gguf"
-MODEL_URL="https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
 DEBUG_LOG="$HOME/.claude/claude-recall-debug.log"
 INSTALL_LOG="$HOME/.claude/claude-recall-install.log"
 
@@ -19,17 +16,17 @@ INSTALL_LOG="$HOME/.claude/claude-recall-install.log"
 # FILES CREATED:
 #   $HOME/.claude/skills/claude-recall/       ← skill repo (scripts, SKILL.md, etc.)
 #   $HOME/.claude/claude-recall.json          ← config (vault path, settings)
-#   $HOME/.claude/models/qwen2.5-0.5b-*.gguf ← LLM model (~380 MB)
 #   $HOME/.claude/claude-recall-install.log   ← pip install log
 #   $HOME/.claude/claude-recall-debug.log     ← runtime debug log
 #   $HOME/.claude/.recall_*                   ← session markers (transient)
 #   <vault>/claude-recall/                    ← Obsidian vault structure
 #
 # FILES MODIFIED:
-#   $HOME/.claude/settings.json               ← adds UserPromptSubmit + Stop hooks
+#   $HOME/.claude/settings.json               ← adds hooks + MCP server
 #
 # PYTHON PACKAGES INSTALLED:
-#   llama-cpp-python                          ← local LLM inference engine
+#   anthropic                                 ← Claude API SDK for summarization
+#   fastmcp                                   ← MCP server for context tools
 #
 # To undo ALL of the above, run:
 #   bash ~/.claude/skills/claude-recall/uninstall.sh
@@ -114,10 +111,11 @@ cat > "$CONFIG" <<EOF
 {
   "vault_path": "$VAULT_PATH",
   "vault_folder": "claude-recall",
-  "max_context_tokens": 2000,
+  "max_context_tokens": 400,
   "include_recent_sessions": 2,
   "save_sessions": true,
-  "load_on_every_prompt": false
+  "load_on_every_prompt": true,
+  "use_claude_api": true
 }
 EOF
 ok "Config written → $CONFIG"
@@ -195,95 +193,38 @@ fi
 
 chmod +x "$INSTALL_DIR/scripts/"*.py 2>/dev/null || true
 
-# ── 5. Install Python dependency: llama-cpp-python ────────────────────────────
+# ── 4. Install Python dependencies ─────────────────────────────────────────────
 echo ""
-info "Installing Python dependency: llama-cpp-python..."
+info "Installing Python dependencies..."
 
-LLAMA_INSTALLED=0
+pip3 install anthropic fastmcp openai --quiet --break-system-packages >> "$INSTALL_LOG" 2>&1
 
-# Check if already importable
-if python3 -c "import llama_cpp" 2>/dev/null; then
-    ok "llama-cpp-python already installed"
-    LLAMA_INSTALLED=1
+if python3 -c "import anthropic; import fastmcp; import openai" 2>/dev/null; then
+    ok "anthropic + fastmcp + openai installed"
 else
-    echo "  Installing llama-cpp-python (this may take 2-5 minutes)..."
-    echo "  Log: $INSTALL_LOG"
-
-    # Attempt 1: pip3 install
-    if command -v pip3 &>/dev/null; then
-        if pip3 install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
-            LLAMA_INSTALLED=1
-        fi
-    fi
-
-    # Attempt 2: python3 -m pip
-    if [ "$LLAMA_INSTALLED" -eq 0 ]; then
-        if python3 -m pip install llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
-            LLAMA_INSTALLED=1
-        fi
-    fi
-
-    # Attempt 3: pip3 with --no-cache-dir (clears stale wheel cache)
-    if [ "$LLAMA_INSTALLED" -eq 0 ]; then
-        if pip3 install --no-cache-dir llama-cpp-python >> "$INSTALL_LOG" 2>&1; then
-            LLAMA_INSTALLED=1
-        fi
-    fi
-
-    # Final verification — python3 can actually import it
-    if [ "$LLAMA_INSTALLED" -eq 1 ]; then
-        if python3 -c "import llama_cpp; print('import OK')" >> "$INSTALL_LOG" 2>&1; then
-            ok "llama-cpp-python installed and verified"
-        else
-            LLAMA_INSTALLED=0
-            warn "llama-cpp-python installed but import failed"
-            warn "Check $INSTALL_LOG for details"
-        fi
-    else
-        warn "llama-cpp-python install failed — LLM summaries will be disabled"
-        warn "To install manually:"
-        warn "  pip3 install llama-cpp-python"
-        warn "  OR: CMAKE_ARGS='-DGGML_METAL=off' pip3 install llama-cpp-python"
-    fi
+    warn "Python packages install failed"
+    warn "Check $INSTALL_LOG for details"
 fi
 
-# ── 6. Download Qwen2.5 0.5B GGUF model ──────────────────────────────────────
-echo ""
-info "Checking local LLM model..."
-mkdir -p "$MODEL_DIR"
-
-if [ -f "$MODEL_FILE" ] && [ -s "$MODEL_FILE" ]; then
-    ok "Model already present: $MODEL_FILE"
+# Check API key (Anthropic or NVIDIA NIM)
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  ok "ANTHROPIC_API_KEY detected"
+elif [ -n "${OPENAI_API_KEY:-}" ] && [ -n "${NVIDIA_NIM_BASE_URL:-}" ]; then
+  ok "NVIDIA NIM detected (OPENAI_API_KEY + NVIDIA_NIM_BASE_URL)"
 else
-    echo "  Downloading Qwen2.5 0.5B (~380 MB, this may take a few minutes)..."
-    DOWNLOADED=0
-    if command -v curl &>/dev/null; then
-        if curl -fL "$MODEL_URL" -o "$MODEL_FILE" 2>&1; then
-            DOWNLOADED=1
-        fi
-    elif command -v wget &>/dev/null; then
-        if wget -q "$MODEL_URL" -O "$MODEL_FILE" 2>&1; then
-            DOWNLOADED=1
-        fi
-    else
-        warn "No curl or wget found — install one to download the LLM model"
-    fi
-
-    if [ "$DOWNLOADED" -eq 1 ] && [ -f "$MODEL_FILE" ] && [ -s "$MODEL_FILE" ]; then
-        ok "Model saved → $MODEL_FILE"
-    else
-        rm -f "$MODEL_FILE"
-        warn "Model download failed — LLM features disabled"
-    fi
+  warn "No API key detected."
+  warn "Set ANTHROPIC_API_KEY or OPENAI_API_KEY+NVIDIA_NIM_BASE_URL"
+  warn "Context generation will fall back to regex until set."
 fi
 
-# ── 7. Register hooks ─────────────────────────────────────────────────────────
+# ── 6. Register hooks ─────────────────────────────────────────────────────────
 echo ""
 info "Registering hooks in $SETTINGS..."
 
 LOAD_CMD="python3 $INSTALL_DIR/scripts/load_context.py"
 SAVE_CMD="python3 $INSTALL_DIR/scripts/save_context.py"
 START_CMD="python3 $INSTALL_DIR/scripts/session_start.py"
+POST_TOOL_CMD="python3 $INSTALL_DIR/scripts/post_tool_use.py"
 
 python3 - <<PYEOF
 import json, sys
@@ -318,6 +259,7 @@ for event, cmd, timeout in [
     ("SessionStart", start_cmd, 10),
     ("UserPromptSubmit", load_cmd, 60),
     ("Stop", save_cmd, 60),
+    ("PostToolUse", POST_TOOL_CMD, 10),
 ]:
     if already(event):
         print(f"  ✓ {event} — already registered")
@@ -369,6 +311,40 @@ settings["statusLine"] = {
 settings_path.write_text(json.dumps(settings, indent=2))
 print(f"  ✓ statusLine → claude-recall wrapper")
 PYEOF
+
+# ── 7c. Register MCP server ────────────────────────────────────────────────────
+echo ""
+info "Registering MCP server..."
+
+MCP_CMD="python3 $INSTALL_DIR/scripts/mcp_server.py"
+
+python3 - <<PYEOF
+import json
+from pathlib import Path
+
+settings_path = Path("$SETTINGS")
+mcp_cmd = "$MCP_CMD"
+
+settings = json.loads(settings_path.read_text())
+
+mcp_servers = settings.setdefault("mcpServers", {})
+
+if "claude-recall" in mcp_servers:
+    print("  ✓ claude-recall MCP — already registered")
+else:
+    mcp_servers["claude-recall"] = {
+        "command": "python3",
+        "args": [mcp_cmd],
+        "env": {
+            "CLAUDE_RECALL_SLUG": "\${CLAUDE_RECALL_SLUG:-unknown}"
+        }
+    }
+    settings_path.write_text(json.dumps(settings, indent=2))
+    print("  ✓ claude-recall MCP → registered")
+
+settings_path.write_text(json.dumps(settings, indent=2))
+print(f"  ✓ Saved {settings_path}")
+PYEOF
 # ── 8. Create vault folder skeleton ──────────────────────────────────────────
 VAULT_CR="$VAULT_PATH/claude-recall"
 mkdir -p "$VAULT_CR/projects"
@@ -389,7 +365,7 @@ EOF
   ok "Vault folder ready → $VAULT_CR"
 fi
 
-# ── 8b. Register /claude-recall slash commands ───────────────────────────────
+# ── 9. Register /claude-recall slash commands ─────────────────────────────────
 CMD_DIR="$HOME/.claude/commands"
 mkdir -p "$CMD_DIR"
 # Copy the top-level command and the subcommand directory
@@ -400,7 +376,7 @@ if [ -d "$INSTALL_DIR/commands/claude-recall" ]; then
 fi
 echo "  ✓ Slash commands registered: /claude-recall, :update, :status, :reset"
 
-# ── 9. Summary ────────────────────────────────────────────────────────────────
+# ── 10. Summary ────────────────────────────────────────────────────────────────
 echo ""
 echo "  ┌───────────────────────────────────────────────┐"
 echo "  │   claude-recall installed  ✓                  │"
@@ -409,10 +385,10 @@ echo ""
 echo "  INSTALLED:"
 echo "    Skill:   $INSTALL_DIR"
 echo "    Config:  $CONFIG"
-echo "    Model:   $MODEL_FILE"
 echo "    Vault:   $VAULT_PATH"
 echo "    Hooks:   UserPromptSubmit + Stop in $SETTINGS"
-echo "    Python:  llama-cpp-python ($([ $LLAMA_INSTALLED -eq 1 ] && echo 'OK' || echo 'FAILED'))"
+echo "    MCP:     claude-recall MCP server registered"
+echo "    API:     Claude API (ANTHROPIC_API_KEY required)"
 echo ""
 echo "  TO UNINSTALL:"
 echo "    bash $INSTALL_DIR/uninstall.sh"
@@ -421,6 +397,7 @@ echo "  NEXT STEP: Restart Claude Code."
 echo ""
 echo "  After restart, open any project directory and start chatting."
 echo "  claude-recall will:"
-echo "    • Load context from Obsidian before your first message"
-echo "    • Save a session note to Obsidian when you exit"
+echo "    • Session start → keyword match → inject 100-200 tokens relevant context"
+echo "    • Session end → Claude API → updates mindmap.json nodes"
+echo "    • Use /recall query <question> for deeper context during session"
 echo ""

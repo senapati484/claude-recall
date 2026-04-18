@@ -63,7 +63,7 @@ curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/inst
 4. Writes a dated session note to the vault
 
 > Your work is **automatically documented** in Obsidian.
-> Uses a **local LLM** (Qwen2.5 0.5B GGUF) — no data leaves your machine.
+> Uses **Claude API** (claude-haiku-4-5) — same model you're chatting with.
 
 **Project slug** is derived from your working directory:
 
@@ -175,7 +175,7 @@ routes/api.js    |  10 ++++
 
 ## 📦 Install
 
-> **Requirements:** Python 3.8+ · Claude Code · Obsidian (with a vault created)
+> **Requirements:** Python 3.8+ · Claude Code · Obsidian · **ANTHROPIC_API_KEY** or **NVIDIA NIM**
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/install.sh | bash
@@ -186,10 +186,9 @@ curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/inst
 1. Asks for your Obsidian vault path (once)
 2. Saves config to `~/.claude/claude-recall.json`
 3. Clones this repo to `~/.claude/skills/claude-recall/`
-4. Installs `llama-cpp-python` via pip
-5. Downloads Qwen2.5 0.5B GGUF model to `~/.claude/models/` (~380 MB)
-6. Registers both hooks in `~/.claude/settings.json`
-7. Creates the vault folder skeleton
+4. Installs `anthropic` and `fastmcp` via pip
+5. Registers hooks + MCP server in `~/.claude/settings.json`
+6. Creates the vault folder skeleton
 
 **⚠️ Restart Claude Code after install.**
 
@@ -213,10 +212,11 @@ Edit `~/.claude/claude-recall.json` to override defaults:
 {
   "vault_path": "/path/to/your/vault",
   "vault_folder": "claude-recall",
-  "max_context_tokens": 2000,
+  "max_context_tokens": 400,
   "include_recent_sessions": 2,
   "save_sessions": true,
-  "load_on_every_prompt": false
+  "load_on_every_prompt": true,
+  "use_claude_api": true
 }
 ```
 
@@ -224,10 +224,11 @@ Edit `~/.claude/claude-recall.json` to override defaults:
 |:--|:--|:--|
 | `vault_path` | _(required)_ | Absolute path to your Obsidian vault |
 | `vault_folder` | `claude-recall` | Folder inside the vault for all notes |
-| `max_context_tokens` | `2000` | Token budget for injected context (~8K chars) |
+| `max_context_tokens` | `400` | Token budget for injected context (~1.6K chars) |
 | `include_recent_sessions` | `2` | How many past session notes to load |
 | `save_sessions` | `true` | Write session notes on exit |
-| `load_on_every_prompt` | `false` | Reload context on every prompt (not just first) |
+| `load_on_every_prompt` | `true` | Reload relevant context on every prompt |
+| `use_claude_api` | `true` | Use Claude API for summarization |
 
 ---
 
@@ -264,19 +265,83 @@ rm ~/.claude/claude-recall.json
 ┌──────────────┐       ┌──────────────────┐       ┌────────────────┐
 │  Claude Code │       │  claude-recall   │       │ Obsidian Vault │
 │              │       │                  │       │                │
-│  Prompt      ├──────►│ load_context.py  │◄──────┤ context.md     │
-│  (once/sess) │       │  (once/session)  │       │ sessions/*.md  │
-│              │       │                  │       │                │
+│  Prompt      ├──────►│ load_context.py  │◄──────┤ mindmap.json   │
+│  (every msg) │       │ + get_relevant() │       │ context.md     │
+│              │       │                  │       │ sessions/*.md  │
 │  Exit        ├──────►│ save_context.py  ├──────►│                │
-│  (stop hook) │       │  + summarize.py  │       └────────────────┘
-└──────────────┘       └────────┬─────────┘
-                                │
-                   ┌────────────┴────────────┐
-                   │   ~/.claude/models/     │
-                   │   qwen2.5-0.5b GGUF     │
-                   └─────────────────────────┘
+│  (stop hook) │       │ + update_mindmap │       └────────────────┘
+│              │       │                  │
+│  Tool use    ├──────►│ post_tool_use.py │       ┌────────────────┐
+│  (edit)      │       │ + mark_stale()   │       │  MCP Server    │
+└──────────────┘       └────────┬─────────┘       │ recall_get()   │
+                                 │                 │ recall_update()│
+                    ┌────────────┴────────────┐    │ recall_session_│
+                    │   Claude API (haiku)    │    │ recall_mindmap │
+                    │   claude-haiku-4-5      │    └────────────────┘
+                    └─────────────────────────┘
 ~/.claude/claude-recall.json
+~/.claude/claude-recall-slug.env
 ```
+
+---
+
+## 🗺️ Mindmap Storage
+
+claude-recall stores project context as a **JSON graph** at `<vault>/claude-recall/projects/<slug>/mindmap.json`:
+
+```json
+{
+  "_meta": {"version": 2, "updated": "2026-04-18"},
+  "nodes": {
+    "project_overview": {
+      "content": "Blood donation platform with donor/recipient matching",
+      "keywords": ["flutter", "express", "mongodb", "setu"],
+      "parent": null,
+      "files": [],
+      "created": "2026-04-10",
+      "last_updated": "2026-04-18",
+      "stale": false
+    },
+    "stack": {
+      "content": "Tech stack: Flutter, Express.js, MongoDB Atlas, Railway",
+      "keywords": ["flutter", "express", "mongodb", "railway"],
+      "parent": "project_overview",
+      "files": ["package.json", "pubspec.yaml"],
+      "stale": false
+    },
+    "auth_system": {
+      "content": "JWT auth with refresh tokens stored in secure storage",
+      "keywords": ["jwt", "auth", "security"],
+      "parent": "project_overview",
+      "files": ["lib/auth/jwt_handler.dart"],
+      "stale": true
+    }
+  },
+  "file_node_map": {
+    "lib/auth/jwt_handler.dart": ["auth_system"]
+  },
+  "sessions": [
+    {"date": "2026-04-18", "summary": "Added JWT auth...", "nodes_updated": ["auth_system"]}
+  ]
+}
+```
+
+**Why JSON?** Enables fast keyword lookups, parent/child relationships, and file→node mapping. The `context.md` in your vault is auto-generated from this JSON for Obsidian viewing.
+
+---
+
+## 🔌 MCP Tools
+
+claude-recall registers an MCP server that exposes 4 tools Claude can call during a session:
+
+| Tool | When used | What it returns |
+|:--|:--|:--|
+| `recall_get(query)` | You ask about past decisions/architecture | Relevant context nodes |
+| `recall_update_node(node_id, content, keywords)` | You explicitly update context | Confirmation |
+| `recall_session_history(count)` | You ask "what did I work on before?" | Last N session summaries |
+| `recall_mindmap()` | You ask for full project overview | Full mindmap tree |
+
+> These tools let Claude fetch deeper context mid-session — not just what was injected at prompt time.
 
 ---
 
@@ -284,13 +349,16 @@ rm ~/.claude/claude-recall.json
 
 | File | Purpose |
 |:--|:--|
-| `install.sh` | One-command GitHub installer (also handles model download) |
+| `install.sh` | One-command GitHub installer |
 | `SKILL.md` | Claude skill metadata and instructions |
-| `scripts/load_context.py` | `UserPromptSubmit` hook — injects Obsidian context (once per session) |
-| `scripts/save_context.py` | `Stop` hook — writes session note, updates context.md with LLM |
-| `scripts/summarize.py` | LLM summarizer using Qwen GGUF |
-| `scripts/recall_update.py` | `/recall` command for on-demand context updates |
-| `scripts/utils.py` | Shared helpers (config, slugs, LLM model management, truncation) |
+| `scripts/load_context.py` | `UserPromptSubmit` hook — injects relevant context nodes |
+| `scripts/save_context.py` | `Stop` hook — writes session note, updates mindmap |
+| `scripts/summarize.py` | LLM summarizer using Claude API (haiku-4-5) |
+| `scripts/mindmap.py` | Mindmap storage + keyword search + node management |
+| `scripts/mcp_server.py` | FastMCP server exposing recall tools to Claude |
+| `scripts/post_tool_use.py` | `PostToolUse` hook — marks nodes stale on file edits |
+| `scripts/recall_update.py` | `/recall` command for manual context updates |
+| `scripts/utils.py` | Shared helpers (config, slugs, truncation, stack detection) |
 | `references/hook-api.md` | Claude Code hook I/O specification |
 | `references/context-structure.md` | Vault note formats and examples |
 
