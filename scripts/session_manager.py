@@ -18,7 +18,7 @@ from pathlib import Path
 
 from utils import (
     cwd_to_slug, get_project_dir, now_str,
-    DEBUG_LOG,
+    DEBUG_LOG, safe_unlink,
 )
 
 
@@ -52,7 +52,7 @@ def should_load_context(session_id: str, cwd: Path) -> bool:
         try:
             age = time.time() - marker.stat().st_mtime
             if age > 4 * 3600:  # 4 hours = stale (crash recovery)
-                marker.unlink()
+                safe_unlink(marker)
                 _debug(f"Stale marker removed: {marker.name} (age={age:.0f}s)")
                 return True
         except Exception:
@@ -74,7 +74,7 @@ def cleanup_stale_markers() -> None:
     for f in (Path.home() / ".claude").glob(".recall_*"):
         try:
             if f.stat().st_mtime < cutoff:
-                f.unlink()
+                safe_unlink(f)
         except Exception:
             pass
 
@@ -84,7 +84,7 @@ def clear_session_marker(session_id: str, cwd: Path) -> None:
     slug = cwd_to_slug(cwd)
     marker = _marker_path(session_id, slug)
     if marker.exists():
-        marker.unlink(missing_ok=True)
+        safe_unlink(marker)
 
 
 # ── Last session summary ──────────────────────────────────────────────────────

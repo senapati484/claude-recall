@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
     load_config, get_project_dir, read_hook_input, get_cwd,
-    cwd_to_slug, truncate_to_tokens, DEBUG_LOG,
+    cwd_to_slug, truncate_to_tokens, DEBUG_LOG, safe_unlink,
 )
 from session_manager import (
     should_load_context, mark_session_loaded, cleanup_stale_markers,
@@ -53,45 +53,47 @@ def _debug(msg: str) -> None:
 
 
 def start_mcp_if_needed() -> None:
-    """Start MCP server process if not already running."""
-    import subprocess
-
-    pid_file = Path.home() / ".claude" / "claude-recall-mcp.pid"
-    script_path = Path(__file__).parent / "mcp_server.py"
-
-    if pid_file.exists():
-        try:
-            existing_pid = int(pid_file.read_text().strip())
-            try:
-                os.kill(existing_pid, 0)
-                _debug(f"MCP already running with PID {existing_pid}")
-                return
-            except (OSError, ProcessLookupError):
-                _debug(f"Stale PID file, removing")
-                pid_file.unlink()
-        except Exception:
-            pid_file.unlink()
-
+    """Start MCP server in background if not already running. Silent on failure."""
     try:
-        env = os.environ.copy()
+        import subprocess
+
+        pid_file = Path.home() / ".claude" / "claude-recall-mcp.pid"
+        script_path = Path(__file__).parent / "mcp_server.py"
+
+        if not script_path.exists():
+            return
+
+        if pid_file.exists():
+            try:
+                pid = int(pid_file.read_text().strip())
+                os.kill(pid, 0)
+                return  # Already running
+            except (ProcessLookupError, ValueError, OSError):
+                safe_unlink(pid_file)
+
+        slug_env = {}
         slug_env_path = Path.home() / ".claude" / "claude-recall-slug.env"
         if slug_env_path.exists():
             for line in slug_env_path.read_text().splitlines():
                 if "=" in line:
-                    key, val = line.split("=", 1)
-                    env[key] = val
+                    k, v = line.split("=", 1)
+                    slug_env[k.strip()] = v.strip()
+
+        env = {**os.environ, **slug_env}
 
         proc = subprocess.Popen(
             [sys.executable, str(script_path)],
-            env=env,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
+            env=env,
             start_new_session=True,
         )
+
         pid_file.write_text(str(proc.pid))
-        _debug(f"Started MCP server with PID {proc.pid}")
+        _debug(f"Started MCP server (pid={proc.pid})")
+
     except Exception as e:
-        _debug(f"Failed to start MCP server: {e}")
+        _debug(f"start_mcp_if_needed failed (non-fatal): {e}")
 
 
 def load_context() -> None:

@@ -19,11 +19,10 @@ Never exits non-zero — a failed hook would block Claude.
 from __future__ import annotations
 
 import json
-import re
-import sys
-import traceback
 import os
+import re
 import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -31,31 +30,50 @@ from pathlib import Path
 try:
     _log = Path.home() / ".claude" / "claude-recall-debug.log"
     with open(_log, "a") as _f:
-        _f.write(f"[{datetime.now().isoformat()}] SAVE: >>> SCRIPT STARTED (pid={os.getpid()})\n")
+        _f.write(
+            f"[{datetime.now().isoformat()}] SAVE: >>> SCRIPT STARTED (pid={os.getpid()})\n"
+        )
 except Exception:
     pass
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-try:
-    from summarize import generate_summary as _llm_summary
-    _HAS_LLM = True
-except ImportError:
-    _HAS_LLM = False
+_HAS_LLM = False  # Disabled for performance - LLM calls block for 30s+
 
 from utils import (
     load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
     cwd_to_slug, now_str, filter_file_paths, detect_project_stack,
-    parse_index_entries, build_index_table, ensure_model, DEBUG_LOG,
+    parse_index_entries, build_index_table, DEBUG_LOG,
 )
 from session_manager import (
     build_session_note, clear_session_marker, cleanup_stale_markers,
 )
 from context_builder import (
-    update_mindmap_after_session, is_context_empty_or_missing,
     build_initial_mindmap,
+    is_context_empty_or_missing,
+    update_mindmap_after_session,
 )
 from mindmap import load_mindmap, mindmap_to_context_md
+from session_manager import (
+    build_session_note,
+    cleanup_stale_markers,
+    clear_session_marker,
+)
+from utils import (
+    DEBUG_LOG,
+    build_index_table,
+    cwd_to_slug,
+    detect_project_stack,
+    filter_file_paths,
+    get_cwd,
+    get_project_dir,
+    get_vault_root,
+    load_config,
+    now_str,
+    parse_index_entries,
+    read_hook_input,
+    safe_unlink,
+)
 
 
 def _debug(msg: str) -> None:
@@ -68,6 +86,7 @@ def _debug(msg: str) -> None:
 
 # ── Transcript parsing ────────────────────────────────────────────────────────
 
+
 def parse_transcript(path: str) -> dict:
     """Parse transcript JSONL and extract structured data.
 
@@ -76,7 +95,10 @@ def parse_transcript(path: str) -> dict:
     - message: {role, content} (only for user/assistant types)
     """
     result = {
-        "messages": [], "tool_calls": [], "errors": [], "file_ops": [],
+        "messages": [],
+        "tool_calls": [],
+        "errors": [],
+        "file_ops": [],
     }
     if not path:
         return result
@@ -116,14 +138,20 @@ def parse_transcript(path: str) -> dict:
                             elif btype == "tool_use":
                                 tool_name = block.get("name", "")
                                 tool_input = block.get("input", {})
-                                result["tool_calls"].append({
-                                    "tool": tool_name,
-                                    "input": tool_input,
-                                })
-                                _track_file_ops(tool_name, tool_input, result["file_ops"])
+                                result["tool_calls"].append(
+                                    {
+                                        "tool": tool_name,
+                                        "input": tool_input,
+                                    }
+                                )
+                                _track_file_ops(
+                                    tool_name, tool_input, result["file_ops"]
+                                )
 
                     if content_str.strip():
-                        result["messages"].append({"role": role, "content": content_str})
+                        result["messages"].append(
+                            {"role": role, "content": content_str}
+                        )
 
                 except json.JSONDecodeError:
                     continue
@@ -156,6 +184,7 @@ def _track_file_ops(tool_name: str, tool_input: dict, file_ops: list) -> None:
 
 # ── Fact extraction ──────────────────────────────────────────────────────────
 
+
 def extract_facts(transcript: dict, cwd: Path) -> dict:
     """Extract session facts from parsed transcript data.
 
@@ -167,13 +196,16 @@ def extract_facts(transcript: dict, cwd: Path) -> dict:
     file_ops = transcript["file_ops"]
 
     user_msgs = [m["content"] for m in messages if m.get("role") == "user"]
-    asst_msgs = [m["content"] for m in messages if m.get("role") == "assistant"
-                 and isinstance(m.get("content"), str)]
+    asst_msgs = [
+        m["content"]
+        for m in messages
+        if m.get("role") == "assistant" and isinstance(m.get("content"), str)
+    ]
 
     # All user prompts (truncated to 300 chars each)
     all_prompts = []
     for msg in user_msgs:
-        cleaned = re.sub(r'<[^>]+>', '', msg).strip()  # strip XML tags
+        cleaned = re.sub(r"<[^>]+>", "", msg).strip()  # strip XML tags
         cleaned = cleaned.replace("\n", " ")[:300]
         if cleaned:
             all_prompts.append(cleaned)
@@ -185,7 +217,11 @@ def extract_facts(transcript: dict, cwd: Path) -> dict:
         summary = ""
         for line in lines[:5]:
             line = line.strip()
-            if len(line) > 15 and not line.startswith("```") and not line.startswith("#"):
+            if (
+                len(line) > 15
+                and not line.startswith("```")
+                and not line.startswith("#")
+            ):
                 summary = line[:150]
                 break
         all_responses.append(summary or lines[0][:150] if lines else "")
@@ -203,15 +239,17 @@ def extract_facts(transcript: dict, cwd: Path) -> dict:
     # Supplement with regex from assistant messages
     asst_text = " ".join(asst_msgs)
     file_re = re.compile(
-        r'[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|'
-        r'md|json|yaml|yml|toml|sh|html|css|scss)\b'
+        r"[\w./\-]+\.(?:tsx?|jsx?|py|dart|go|rs|rb|java|kt|swift|"
+        r"md|json|yaml|yml|toml|sh|html|css|scss)\b"
     )
     raw_files = list(dict.fromkeys(m.group() for m in file_re.finditer(asst_text)))
     files = list(dict.fromkeys(files + raw_files))
     files = filter_file_paths(files, cwd)
 
     return {
-        "first_prompt": (user_msgs[0][:300].replace("\n", " ") if user_msgs else "(no messages)"),
+        "first_prompt": (
+            user_msgs[0][:300].replace("\n", " ") if user_msgs else "(no messages)"
+        ),
         "all_prompts": all_prompts,
         "all_responses": all_responses,
         "file_ops_summary": file_ops_summary[:20],
@@ -227,7 +265,9 @@ def extract_current_state(transcript: dict) -> str:
 
     Uses the LAST user message (most recent work).
     """
-    user_msgs = [m["content"] for m in transcript["messages"] if m.get("role") == "user"]
+    user_msgs = [
+        m["content"] for m in transcript["messages"] if m.get("role") == "user"
+    ]
     if not user_msgs:
         return ""
 
@@ -235,11 +275,11 @@ def extract_current_state(transcript: dict) -> str:
     last_prompt = user_msgs[-1].strip().split("\n")[0][:150]
 
     # Clean up
-    last_prompt = re.sub(r'<[^>]+>', '', last_prompt).strip()
+    last_prompt = re.sub(r"<[^>]+>", "", last_prompt).strip()
     if len(last_prompt) < 10:
         # Fall back to first
         last_prompt = user_msgs[0].strip().split("\n")[0][:150]
-        last_prompt = re.sub(r'<[^>]+>', '', last_prompt).strip()
+        last_prompt = re.sub(r"<[^>]+>", "", last_prompt).strip()
         if len(last_prompt) < 10:
             return ""
 
@@ -252,7 +292,9 @@ def extract_current_state(transcript: dict) -> str:
 
 def extract_decisions(transcript: dict) -> list[str]:
     """Extract architecture/design decisions from transcript."""
-    assistant_msgs = [m["content"] for m in transcript["messages"] if m.get("role") == "assistant"]
+    assistant_msgs = [
+        m["content"] for m in transcript["messages"] if m.get("role") == "assistant"
+    ]
     decisions = []
     patterns = [
         r"I\s+(?:chose|decided|picked|went\s+with|opted\s+for)\s+([A-Z].{10,100})",
@@ -278,21 +320,30 @@ def get_git_changes(cwd: Path) -> dict:
     try:
         branch = subprocess.run(
             ["git", "branch", "--show-current"],
-            cwd=str(cwd), capture_output=True, text=True, timeout=3
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         if branch.returncode == 0:
             result["branch"] = branch.stdout.strip()
 
         diff = subprocess.run(
             ["git", "diff", "--name-only", "HEAD"],
-            cwd=str(cwd), capture_output=True, text=True, timeout=3
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         if diff.returncode == 0:
             result["changed_files"] = [f for f in diff.stdout.strip().splitlines() if f]
 
         log = subprocess.run(
             ["git", "log", "--oneline", "-3"],
-            cwd=str(cwd), capture_output=True, text=True, timeout=3
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            timeout=3,
         )
         if log.returncode == 0:
             result["recent_commits"] = [c for c in log.stdout.strip().splitlines() if c]
@@ -303,7 +354,9 @@ def get_git_changes(cwd: Path) -> dict:
 
 def extract_gotchas(transcript: dict) -> list[str]:
     """Extract important warnings/gotchas from assistant messages."""
-    assistant_msgs = [m["content"] for m in transcript["messages"] if m.get("role") == "assistant"]
+    assistant_msgs = [
+        m["content"] for m in transcript["messages"] if m.get("role") == "assistant"
+    ]
     gotchas = []
     patterns = [
         r"(?:watch out|be careful|don't forget|make sure|important)[\s:]+([A-Z][^\n]{15,150})(?:\.|$)",
@@ -323,6 +376,7 @@ def extract_gotchas(transcript: dict) -> list[str]:
 
 # ── Session note path ─────────────────────────────────────────────────────────
 
+
 def _session_note_path(sessions_dir: Path, session_id: str) -> Path:
     """Get session note path — uses session_id so the same session always
     overwrites the same file (critical because Stop fires per-turn).
@@ -335,6 +389,7 @@ def _session_note_path(sessions_dir: Path, session_id: str) -> Path:
 
 
 # ── Index update ──────────────────────────────────────────────────────────────
+
 
 def update_index(vault_root: Path, slug: str, cwd: Path, turns: int) -> None:
     """Update _index.md with deduplicated project entry."""
@@ -352,13 +407,15 @@ def update_index(vault_root: Path, slug: str, cwd: Path, turns: int) -> None:
             break
 
     if not found:
-        entries.append({
-            "slug": slug,
-            "directory": str(cwd),
-            "sessions": 1,
-            "total_turns": turns,
-            "last_active": now_str("%Y-%m-%d %H:%M"),
-        })
+        entries.append(
+            {
+                "slug": slug,
+                "directory": str(cwd),
+                "sessions": 1,
+                "total_turns": turns,
+                "last_active": now_str("%Y-%m-%d %H:%M"),
+            }
+        )
 
     index_path.write_text(build_index_table(entries), encoding="utf-8")
     _debug(f"Index updated: {slug} ({'existing' if found else 'new'})")
@@ -369,11 +426,11 @@ def update_index(vault_root: Path, slug: str, cwd: Path, turns: int) -> None:
 def save_session() -> None:
     _debug("=== SAVE SESSION STARTED ===")
 
-    hook_input      = read_hook_input()
-    session_id      = hook_input.get("session_id", now_str())
+    hook_input = read_hook_input()
+    session_id = hook_input.get("session_id", now_str())
     transcript_path = hook_input.get("transcript_path", "")
-    cwd             = get_cwd(hook_input)
-    cfg             = load_config()
+    cwd = get_cwd(hook_input)
+    cfg = load_config()
 
     _debug(f"session_id={session_id}, cwd={cwd}")
 
@@ -384,17 +441,21 @@ def save_session() -> None:
         return
 
     # Parse the FULL transcript (it grows with each turn)
-    transcript = parse_transcript(transcript_path) if transcript_path else {
-        "messages": [], "tool_calls": [], "errors": [], "file_ops": []
-    }
+    transcript = (
+        parse_transcript(transcript_path)
+        if transcript_path
+        else {"messages": [], "tool_calls": [], "errors": [], "file_ops": []}
+    )
     messages = transcript["messages"]
-    _debug(f"Parsed {len(messages)} messages, {len(transcript['tool_calls'])} tool calls")
+    _debug(
+        f"Parsed {len(messages)} messages, {len(transcript['tool_calls'])} tool calls"
+    )
     if not messages:
         _debug("No messages - returning early")
         return
 
-    slug        = cwd_to_slug(cwd)
-    vault_root  = get_vault_root(cfg)
+    slug = cwd_to_slug(cwd)
+    vault_root = get_vault_root(cfg)
     project_dir = get_project_dir(cfg, slug)
 
     try:
@@ -409,7 +470,7 @@ def save_session() -> None:
 
     # LLM summary — only attempt if transcript has enough content (>= 2 messages)
     llm_data = None
-    if _HAS_LLM and ensure_model() and facts["total_messages"] >= 2:
+    if _HAS_LLM and facts["total_messages"] >= 2:
         llm_data = _llm_summary(messages, facts=facts)
         if llm_data:
             _debug(f"LLM summary OK: {llm_data.get('summary', '')[:60]}")
@@ -438,7 +499,7 @@ def save_session() -> None:
         }
     else:
         decisions = extract_decisions(transcript)
-        files_and_roles = {f: "modified" for f in key_files[:5]}
+        files_and_roles = {}
         summary_dict = {
             "summary": extract_current_state(transcript),
             "keywords": [],
@@ -446,7 +507,7 @@ def save_session() -> None:
             "files_and_roles": files_and_roles,
         }
 
-    # Update mindmap.json with session learnings
+    git_changes = get_git_changes(cwd)
     changed_files = facts.get("files", []) + git_changes.get("changed_files", [])
     update_mindmap_after_session(
         project_dir=project_dir,
@@ -475,7 +536,9 @@ def save_session() -> None:
         _debug("Note written successfully")
     except PermissionError as e:
         _debug(f"Permission error writing note: {e}")
-        print(f"[claude-recall] Cannot write session note: {note_path}", file=sys.stderr)
+        print(
+            f"[claude-recall] Cannot write session note: {note_path}", file=sys.stderr
+        )
         return
 
     # Update vault index — only on first save for this session
@@ -493,7 +556,9 @@ def save_session() -> None:
     # Don't clear the session marker here — the session is still active!
     # The marker will be cleaned up by stale marker cleanup on next load.
 
-    _debug(f"=== SAVED: {note_path} (turns={facts['turns']}, msgs={facts['total_messages']}) ===")
+    _debug(
+        f"=== SAVED: {note_path} (turns={facts['turns']}, msgs={facts['total_messages']}) ==="
+    )
     # Silent — no TTY notification on save to avoid cluttering terminal
 
 

@@ -114,7 +114,7 @@ cat > "$CONFIG" <<EOF
   "max_context_tokens": 400,
   "include_recent_sessions": 2,
   "save_sessions": true,
-  "load_on_every_prompt": true,
+  "load_on_every_prompt": false,
   "use_claude_api": true
 }
 EOF
@@ -310,11 +310,22 @@ if isinstance(current_sl, dict):
 elif isinstance(current_sl, str):
     current_cmd = current_sl
 
-# Save the upstream command (if it's not already our wrapper)
-if current_cmd and "claude-recall" not in current_cmd:
+def is_valid_command(cmd: str) -> bool:
+    """Check if the first word of a command exists in PATH."""
+    if not cmd:
+        return False
+    first_word = cmd.strip().split()[0]
+    if first_word in ("python3", "python", "node", "bash", "sh"):
+        return True
+    import shutil
+    return shutil.which(first_word) is not None
+
+if current_cmd and "claude-recall" not in current_cmd and is_valid_command(current_cmd):
     upstream_path.write_text(current_cmd)
-    print(f"  ✓ Saved upstream statusLine → {upstream_path}")
-elif not upstream_path.exists():
+    print(f"  ✓ Saved upstream statusLine: {current_cmd[:50]}")
+else:
+    if current_cmd and "claude-recall" not in current_cmd:
+        print(f"  ! Upstream statusLine '{current_cmd[:40]}' not found — skipping")
     upstream_path.write_text("")
 
 # Set our wrapper as the statusLine
@@ -325,6 +336,18 @@ settings["statusLine"] = {
 settings_path.write_text(json.dumps(settings, indent=2))
 print(f"  ✓ statusLine → claude-recall wrapper")
 PYEOF
+
+UPSTREAM_FILE="$HOME/.claude/claude-recall-upstream-statusline.txt"
+if [ -f "$UPSTREAM_FILE" ]; then
+    UPSTREAM_CMD=$(cat "$UPSTREAM_FILE" 2>/dev/null || echo "")
+    if [ -n "$UPSTREAM_CMD" ]; then
+        FIRST_WORD=$(echo "$UPSTREAM_CMD" | awk '{print $1}')
+        if ! command -v "$FIRST_WORD" &>/dev/null; then
+            echo "  ! Clearing stale upstream statusLine: $UPSTREAM_CMD"
+            echo "" > "$UPSTREAM_FILE"
+        fi
+    fi
+fi
 
 # ── 7c. Register MCP server ────────────────────────────────────────────────────
 echo ""

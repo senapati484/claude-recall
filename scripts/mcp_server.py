@@ -18,7 +18,12 @@ import os
 import sys
 from pathlib import Path
 
-from fastmcp import FastMCP
+try:
+    from fastmcp import FastMCP
+    _FASTMCP_AVAILABLE = True
+except ImportError:
+    _FASTMCP_AVAILABLE = False
+    FastMCP = None
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -30,6 +35,11 @@ from mindmap import (
     save_mindmap,
 )
 
+
+if not _FASTMCP_AVAILABLE:
+    print("[claude-recall] mcp_server: fastmcp not installed.", file=sys.stderr)
+    print("[claude-recall] Run: pip3 install fastmcp --break-system-packages", file=sys.stderr)
+    sys.exit(1)
 
 mcp = FastMCP("claude-recall")
 
@@ -224,4 +234,7 @@ def recall_mindmap() -> str:
 
 
 if __name__ == "__main__":
+    if not _FASTMCP_AVAILABLE:
+        print("fastmcp not installed: pip3 install fastmcp --break-system-packages")
+        sys.exit(1)
     mcp.run()

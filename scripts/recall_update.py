@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
     load_config, get_vault_root, get_project_dir,
-    cwd_to_slug, detect_project_stack, llm_available,
+    cwd_to_slug, detect_project_stack, llm_available, safe_unlink,
 )
 from context_builder import build_initial_mindmap
 from mindmap import (
@@ -156,83 +156,231 @@ def action_reset(cwd: Path, cfg: dict) -> None:
 
 
 def action_doctor(cwd: Path, cfg: dict) -> None:
-    """Check claude-recall setup health."""
+    """Run comprehensive health check of claude-recall installation."""
+    import shutil, subprocess, json as _json, time
+    from pathlib import Path
+
     print("## claude-recall: doctor")
     print()
-    
-    # Check claude CLI
+    ok_count = 0
+    err_count = 0
+
+    def ok(msg):
+        nonlocal ok_count
+        print(f"  ✓ {msg}")
+        ok_count += 1
+
+    def err(msg, hint=""):
+        nonlocal err_count
+        print(f"  ✗ {msg}")
+        if hint:
+            print(f"    → {hint}")
+        err_count += 1
+
+    def warn(msg):
+        print(f"  ! {msg}")
+
+    # 1. Python version
+    import sys
+    v = sys.version_info
+    if v >= (3, 8):
+        ok(f"Python {v.major}.{v.minor}.{v.micro}")
+    else:
+        err(f"Python {v.major}.{v.minor} — need 3.8+")
+
+    # 2. claude CLI
     claude_path = shutil.which("claude")
     if claude_path:
-        print(f"  ✓ claude CLI: {claude_path}")
         try:
             r = subprocess.run(
                 ["claude", "-p", "--bare", "--dangerously-skip-permissions",
-                 "--output-format", "text", "Reply with: OK"],
-                capture_output=True, text=True, timeout=15,
+                 "--output-format", "text", "Say: RECALL_TEST_OK"],
+                capture_output=True, text=True, timeout=20,
             )
-            if r.returncode == 0:
-                print(f"  ✓ claude -p: working (response: {r.stdout.strip()[:20]})")
+            if r.returncode == 0 and r.stdout.strip():
+                ok(f"claude CLI: working ({claude_path})")
             else:
-                print(f"  ✗ claude -p: returned code {r.returncode}")
-                print(f"    stderr: {r.stderr[:100]}")
+                err(f"claude CLI: found but test failed (exit {r.returncode})",
+                    hint=r.stderr.strip()[:80] or "Check Claude Code auth")
+        except subprocess.TimeoutExpired:
+            err("claude CLI: test timed out", hint="Claude Code may be offline")
         except Exception as e:
-            print(f"  ✗ claude -p test failed: {e}")
+            err(f"claude CLI: {e}")
     else:
-        print("  ✗ claude CLI: not found in PATH")
-    
-    # Check API keys (fallback)
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        print("  ✓ ANTHROPIC_API_KEY: set")
-    else:
-        print("  - ANTHROPIC_API_KEY: not set (ok if using claude CLI)")
-    
-    if os.environ.get("OPENAI_API_KEY") and os.environ.get("NVIDIA_NIM_BASE_URL"):
-        print("  ✓ NVIDIA NIM: configured")
-    
-    # Check vault + mindmap
-    slug = cwd_to_slug(cwd)
-    project_dir = get_project_dir(cfg, slug)
-    mindmap_path = project_dir / "mindmap.json"
-    
+        err("claude CLI: not found", hint="Install Claude Code and ensure it's in PATH")
+
+    # 3. Dependencies
     print()
-    print(f"  Project slug: {slug}")
-    print(f"  Vault: {cfg.get('vault_path')}")
-    
-    if mindmap_path.exists():
-        data = json.loads(mindmap_path.read_text())
-        nodes = data.get("nodes", {})
-        stale = [k for k, v in nodes.items() if v.get("stale")]
-        print(f"  ✓ mindmap.json: {len(nodes)} nodes ({len(stale)} stale)")
+    for dep, required in [("anthropic", False), ("fastmcp", True), ("openai", False)]:
+        try:
+            __import__(dep)
+            ok(f"{dep}: installed")
+        except ImportError:
+            if required:
+                err(f"{dep}: missing", hint=f"pip3 install {dep} --break-system-packages")
+            else:
+                warn(f"{dep}: not installed (optional fallback)")
+
+    # 4. Config + vault
+    print()
+    vault = cfg.get("vault_path", "")
+    if vault and Path(vault).exists():
+        ok(f"vault: {vault}")
     else:
-        print(f"  - mindmap.json: not generated yet (run: /recall update)")
-    
-    # Check hooks registered
+        err(f"vault: not found at '{vault}'", hint="Re-run install.sh")
+
+    # 5. Hooks
+    print()
     settings_path = Path.home() / ".claude" / "settings.json"
     if settings_path.exists():
-        settings = json.loads(settings_path.read_text())
+        settings = _json.loads(settings_path.read_text())
         hooks = settings.get("hooks", {})
-        for event in ["UserPromptSubmit", "Stop", "PostToolUse"]:
+        required_hooks = {
+            "SessionStart": "session_start.py",
+            "UserPromptSubmit": "load_context.py",
+            "Stop": "save_context.py",
+            "PostToolUse": "post_tool_use.py",
+        }
+        for event, script in required_hooks.items():
             found = any(
-                "claude-recall" in h.get("command", "")
+                script in h.get("command", "")
                 for e in hooks.get(event, [])
                 for h in e.get("hooks", [])
             )
-            status = "✓" if found else "✗"
-            print(f"  {status} Hook: {event}")
-    
-    # Test summarization
+            if found:
+                ok(f"hook: {event}")
+            else:
+                err(f"hook: {event} missing", hint="Re-run install.sh")
+    else:
+        err("settings.json not found", hint="Re-run install.sh")
+
+    # 6. Upstream statusLine
     print()
-    print("Testing summarization...")
-    r = subprocess.run(
-        ["python3", str(Path(__file__).parent / "summarize.py")],
-        capture_output=True, text=True, timeout=30,
-    )
-    print(r.stdout)
-    if r.returncode != 0:
-        print(f"  ✗ summarize test failed: {r.stderr[:200]}")
-    
+    upstream_path = Path.home() / ".claude" / "claude-recall-upstream-statusline.txt"
+    if upstream_path.exists():
+        upstream_cmd = upstream_path.read_text().strip()
+        if not upstream_cmd:
+            ok("statusLine: no upstream (clean)")
+        else:
+            first_word = upstream_cmd.split()[0]
+            is_valid = (first_word in ("python3", "python", "node", "bash", "sh")
+                        or shutil.which(first_word) is not None)
+            if is_valid:
+                ok(f"statusLine upstream: valid ({upstream_cmd[:50]})")
+            else:
+                err(f"statusLine upstream: stale command '{upstream_cmd[:40]}'",
+                    hint="Run: python3 recall_update.py repair")
+
+    # 7. Mindmap for current project
     print()
-    print("Run 'python3 recall_update.py update' to regenerate mindmap.")
+    slug = cwd_to_slug(cwd)
+    project_dir = get_project_dir(cfg, slug)
+    mindmap_path = project_dir / "mindmap.json"
+
+    print(f"  Project slug: {slug}")
+    if mindmap_path.exists():
+        try:
+            data = _json.loads(mindmap_path.read_text())
+            nodes = data.get("nodes", {})
+            stale = [k for k, v in nodes.items() if v.get("stale")]
+            ok(f"mindmap.json: {len(nodes)} nodes ({len(stale)} stale)")
+        except Exception as e:
+            err(f"mindmap.json: corrupt — {e}", hint="Run: python3 recall_update.py reset")
+    else:
+        warn(f"mindmap.json: not yet generated (run: python3 recall_update.py update)")
+
+    # Summary
+    print()
+    print(f"  Result: {ok_count} OK, {err_count} error(s)")
+    if err_count == 0:
+        print("  ✓ claude-recall is healthy. Restart Claude Code if you just installed.")
+    else:
+        print("  ✗ Fix the errors above, then restart Claude Code.")
+
+
+def action_repair(cwd: Path, cfg: dict) -> None:
+    """Fix common installation issues without re-running install.sh."""
+    import shutil, json as _json
+    from pathlib import Path
+
+    print("## claude-recall: repair")
+    print()
+    fixed = 0
+
+    upstream_path = Path.home() / ".claude" / "claude-recall-upstream-statusline.txt"
+    if upstream_path.exists():
+        upstream_cmd = upstream_path.read_text().strip()
+        if upstream_cmd:
+            first_word = upstream_cmd.split()[0]
+            valid = (first_word in ("python3", "python", "node", "bash", "sh")
+                     or shutil.which(first_word) is not None)
+            if not valid:
+                upstream_path.write_text("")
+                print(f"  ✓ Cleared stale upstream statusLine: '{upstream_cmd[:60]}'")
+                fixed += 1
+            else:
+                print(f"  ✓ Upstream statusLine OK: '{upstream_cmd[:60]}'")
+        else:
+            print(f"  ✓ Upstream statusLine: empty (no upstream)")
+    else:
+        print(f"  - Upstream statusLine file not found")
+
+    settings_path = Path.home() / ".claude" / "settings.json"
+    if settings_path.exists():
+        settings = _json.loads(settings_path.read_text())
+        hooks = settings.get("hooks", {})
+        required_hooks = {
+            "SessionStart": "session_start.py",
+            "UserPromptSubmit": "load_context.py",
+            "Stop": "save_context.py",
+            "PostToolUse": "post_tool_use.py",
+        }
+        for event, script in required_hooks.items():
+            found = any(
+                script in h.get("command", "")
+                for e in hooks.get(event, [])
+                for h in e.get("hooks", [])
+            )
+            if found:
+                print(f"  ✓ Hook: {event}")
+            else:
+                print(f"  ✗ Hook: {event} — NOT registered (re-run install.sh)")
+
+    print()
+    print("  Checking dependencies...")
+    deps = {"anthropic": False, "fastmcp": False, "openai": False}
+    for dep in deps:
+        try:
+            __import__(dep)
+            deps[dep] = True
+            print(f"  ✓ {dep}: installed")
+        except ImportError:
+            print(f"  ✗ {dep}: missing — run: pip3 install {dep} --break-system-packages")
+
+    print()
+    claude_path = shutil.which("claude")
+    if claude_path:
+        print(f"  ✓ claude CLI: {claude_path}")
+    else:
+        print(f"  ✗ claude CLI: not in PATH")
+
+    marker_dir = Path.home() / ".claude"
+    import time
+    stale_markers = [
+        f for f in marker_dir.glob(".recall_*")
+        if time.time() - f.stat().st_mtime > 3600
+    ]
+    if stale_markers:
+        for m in stale_markers:
+            safe_unlink(m)
+        print(f"  ✓ Removed {len(stale_markers)} stale session marker(s)")
+        fixed += 1
+
+    print()
+    if fixed > 0:
+        print(f"  ✓ Repaired {fixed} issue(s). Restart Claude Code to apply.")
+    else:
+        print(f"  ✓ No issues found. If errors persist, re-run install.sh.")
 
 
 def main() -> None:
@@ -267,11 +415,13 @@ def main() -> None:
             sys.exit(1)
     elif action in ("reset", "r"):
         action_reset(cwd, cfg)
-    elif action in ("doctor", "d"):
+    elif action in ("doctor", "check", "d"):
         action_doctor(cwd, cfg)
+    elif action in ("repair", "fix"):
+        action_repair(cwd, cfg)
     else:
         print(f"Unknown action: {action}")
-        print("Usage: recall_update.py [update|status|query|doctor|reset] [cwd]")
+        print("Usage: recall_update.py [update|status|query|doctor|repair|reset] [cwd]")
         sys.exit(1)
 
 

@@ -9,7 +9,8 @@ KEY FUNCTIONS:
 - get_vault_root() / get_project_dir() — vault path resolution
 - cwd_to_slug() — project directory → Obsidian-safe slug
 - detect_project_stack() — scan filesystem for tech stack
-- get_llm() — cached Llama instance singleton
+- get_anthropic_client() — Anthropic SDK client (optional fallback)
+- llm_available() — check if claude CLI or API keys are available
 - merge_auto_section() — update auto-marker sections in context.md
 """
 
@@ -25,6 +26,14 @@ from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".claude" / "claude-recall.json"
 DEBUG_LOG = Path.home() / ".claude" / "claude-recall-debug.log"
+
+
+def safe_unlink(path: Path) -> None:
+    """Remove a file if it exists. Compatible with Python 3.7+."""
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
 
 
 def debug_log(msg: str) -> None:
@@ -586,3 +595,31 @@ def build_index_table(entries: list[dict]) -> str:
         )
 
     return header + "\n".join(rows) + "\n"
+
+
+# ── Compatibility stubs (old Qwen/llama-cpp functions — kept for import safety) ─
+
+def ensure_model() -> bool:
+    """Compatibility stub — always returns True (model check removed with Qwen).
+
+    Previously checked if the Qwen GGUF model file was downloaded.
+    Now claude -p CLI handles summarization, so no model file is needed.
+    """
+    return True
+
+
+def get_model_path() -> Path:
+    """Compatibility stub — returns a dummy path (no longer used).
+
+    Previously returned the path to the Qwen GGUF file.
+    """
+    return Path.home() / ".claude" / "models" / "REMOVED_SEE_CLAUDE_CLI"
+
+
+def get_llm():
+    """Compatibility stub — always returns None (llama-cpp removed).
+
+    Previously returned a cached Llama() instance.
+    Now returns None so callers fall back to other methods.
+    """
+    return None

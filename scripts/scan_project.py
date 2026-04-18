@@ -2,7 +2,7 @@
 scan_project.py — Per-file project intelligence for claude-recall.
 
 Scans the current working directory for source files, runs each through
-the local Qwen model, and writes structured summaries to:
+claude -p CLI, and writes structured summaries to:
   <vault>/claude-recall/projects/<slug>/file-index.json
 
 Incremental: re-processes only files whose mtime changed since last run.
@@ -17,15 +17,16 @@ import json
 import os
 import sys
 import time
+import shutil
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
-    load_config, get_project_dir, read_hook_input,
-    get_cwd, cwd_to_slug, llm_available, get_model_path,
+    load_config, get_project_dir,
+    get_cwd, cwd_to_slug, llm_available,
 )
 
-# Source file extensions to scan
 SOURCE_EXTENSIONS = {
     ".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".go",
     ".rs", ".java", ".kt", ".swift", ".rb", ".php",
@@ -33,7 +34,6 @@ SOURCE_EXTENSIONS = {
     ".sh", ".bash", ".yaml", ".yml", ".toml", ".json",
 }
 
-# Directories to always skip
 SKIP_DIRS = {
     ".git", "node_modules", ".venv", "venv", "__pycache__",
     ".dart_tool", "build", "dist", ".next", ".nuxt",
@@ -41,32 +41,13 @@ SKIP_DIRS = {
     "vendor", "pods", ".gradle", "android/build",
 }
 
-# Max file size to read (bytes) — skip huge generated files
 MAX_FILE_BYTES = 40_000
-
-_FILE_PROMPT = """Analyse this source file and respond ONLY with valid JSON:
-
-File: {filename}
-Content:
-{content}
-
-Output exactly this JSON:
-{{
-  "purpose": "one sentence: what this file does",
-  "exports": ["function or class name 1", "function or class name 2"],
-  "depends_on": ["imported module or file 1", "imported module or file 2"],
-  "keywords": ["tag1", "tag2", "tag3"]
-}}
-
-Be concise. exports and depends_on: list only the most important 3-5 items each.
-"""
 
 
 def collect_files(root: Path) -> list[Path]:
     """Walk root, return source files respecting SKIP_DIRS and MAX_FILE_BYTES."""
     result = []
     for dirpath, dirnames, filenames in os.walk(root):
-        # Prune skip dirs in-place so os.walk doesn't descend into them
         dirnames[:] = [d for d in dirnames if d not in SKIP_DIRS]
         for fn in filenames:
             fp = Path(dirpath) / fn
@@ -79,29 +60,45 @@ def collect_files(root: Path) -> list[Path]:
     return result
 
 
-def summarise_file(llm, filepath: Path, root: Path) -> dict | None:
-    """Ask the LLM to summarise a single source file. Returns dict or None."""
+def summarise_file_with_cli(filepath: Path, root: Path) -> dict | None:
+    """Summarize a source file using claude -p CLI."""
+    if not shutil.which("claude"):
+        return None
+
     try:
         content = filepath.read_text(encoding="utf-8", errors="replace")
-        # Trim to ~100 lines to keep context usage sane
-        lines = content.splitlines()[:120]
+        lines = content.splitlines()[:80]
         content_trimmed = "\n".join(lines)
         rel = str(filepath.relative_to(root))
 
-        prompt = _FILE_PROMPT.format(filename=rel, content=content_trimmed)
-        response = llm.create_chat_completion(
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=256,
-            temperature=0.1,
+        prompt = f"""Analyze this source file and output ONLY valid JSON, no markdown:
+
+File: {rel}
+Content:
+{content_trimmed}
+
+Output this exact JSON structure:
+{{"purpose": "one sentence what this file does", "exports": ["name1", "name2"], "depends_on": ["module1", "module2"], "keywords": ["tag1", "tag2", "tag3"]}}"""
+
+        result = subprocess.run(
+            ["claude", "-p", "--bare", "--dangerously-skip-permissions",
+             "--output-format", "text", prompt],
+            capture_output=True, text=True, timeout=20,
         )
-        raw = response["choices"][0]["message"]["content"].strip()
+
+        if result.returncode != 0 or not result.stdout.strip():
+            return None
+
+        raw = result.stdout.strip()
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
                 raw = raw[4:]
-        result = json.loads(raw)
-        result["file"] = rel
-        return result
+        raw = raw.strip()
+
+        data = json.loads(raw)
+        data["file"] = rel
+        return data
     except Exception as exc:
         print(f"[scan] skipped {filepath.name}: {exc}", file=sys.stderr)
         return None
@@ -110,9 +107,7 @@ def summarise_file(llm, filepath: Path, root: Path) -> dict | None:
 def scan_project() -> None:
     if not llm_available():
         print(
-            "[claude-recall] scan_project: model not found at "
-            f"{get_model_path()}\n"
-            "Run install.sh to download it.",
+            "[claude-recall] scan_project: claude CLI not found. Install Claude Code.",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -125,7 +120,6 @@ def scan_project() -> None:
 
     index_path = project_dir / "file-index.json"
 
-    # Load existing index + mtime cache
     existing: dict = {}
     mtimes: dict = {}
     if index_path.exists():
@@ -139,15 +133,6 @@ def scan_project() -> None:
     files = collect_files(cwd)
     print(f"[claude-recall] scan_project: found {len(files)} source files in {cwd}")
 
-    from llama_cpp import Llama
-    llm = Llama(
-        model_path=str(get_model_path()),
-        n_ctx=8192,
-        n_threads=4,
-        n_gpu_layers=0,
-        verbose=False,
-    )
-
     updated = dict(existing)
     new_mtimes = dict(mtimes)
     processed = 0
@@ -159,18 +144,16 @@ def scan_project() -> None:
         except OSError:
             continue
 
-        # Skip if file hasn't changed since last scan
         if mtimes.get(rel) == mtime and rel in existing:
             continue
 
-        summary = summarise_file(llm, fp, cwd)
+        summary = summarise_file_with_cli(fp, cwd)
         if summary:
             updated[rel] = summary
             new_mtimes[rel] = mtime
             processed += 1
             print(f"  + {rel}")
 
-    # Write back with mtime cache
     output = dict(updated)
     output["_cache_mtimes"] = new_mtimes
     index_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
