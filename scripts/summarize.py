@@ -392,3 +392,24 @@ def _repair_json(raw: str) -> dict | None:
         ]
 
     return result
+
+
+if __name__ == "__main__":
+    test_messages = [
+        {"role": "user", "content": "Fix the JWT authentication bug in the Express routes"},
+        {"role": "assistant", "content": "I found the issue — the token expiry check was using seconds instead of milliseconds. Fixed in middleware/auth.js"},
+        {"role": "user", "content": "Also add rate limiting to the login endpoint"},
+        {"role": "assistant", "content": "Added express-rate-limit to the login route — 5 attempts per 15 minutes"},
+    ]
+    
+    print("[test] Testing summarize.py...")
+    print(f"[test] llm_available: {llm_available()}")
+    print(f"[test] cli_available: {cli_available()}")
+    
+    result = generate_summary(test_messages)
+    if result:
+        print(f"[test] ✓ Summary: {result['summary']}")
+        print(f"[test] ✓ Keywords: {result['keywords']}")
+        print(f"[test] ✓ Next steps: {result['next_steps']}")
+    else:
+        print("[test] ✗ generate_summary returned None (regex fallback will be used)")

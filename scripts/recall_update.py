@@ -220,6 +220,17 @@ def action_doctor(cwd: Path, cfg: dict) -> None:
             status = "✓" if found else "✗"
             print(f"  {status} Hook: {event}")
     
+    # Test summarization
+    print()
+    print("Testing summarization...")
+    r = subprocess.run(
+        ["python3", str(Path(__file__).parent / "summarize.py")],
+        capture_output=True, text=True, timeout=30,
+    )
+    print(r.stdout)
+    if r.returncode != 0:
+        print(f"  ✗ summarize test failed: {r.stderr[:200]}")
+    
     print()
     print("Run 'python3 recall_update.py update' to regenerate mindmap.")
 
