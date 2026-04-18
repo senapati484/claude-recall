@@ -206,15 +206,28 @@ else
     warn "Check $INSTALL_LOG for details"
 fi
 
-# Check API key (Anthropic or NVIDIA NIM)
-if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-  ok "ANTHROPIC_API_KEY detected"
-elif [ -n "${OPENAI_API_KEY:-}" ] && [ -n "${NVIDIA_NIM_BASE_URL:-}" ]; then
-  ok "NVIDIA NIM detected (OPENAI_API_KEY + NVIDIA_NIM_BASE_URL)"
+# Check claude CLI (primary backend - no API key needed)
+if command -v claude &>/dev/null; then
+  ok "claude CLI detected — will use for context generation (no API key needed)"
+  CLAUDE_CLI_AVAILABLE=true
 else
-  warn "No API key detected."
-  warn "Set ANTHROPIC_API_KEY or OPENAI_API_KEY+NVIDIA_NIM_BASE_URL"
-  warn "Context generation will fall back to regex until set."
+  CLAUDE_CLI_AVAILABLE=false
+  warn "claude CLI not found in PATH. This is unexpected since claude-recall"
+  warn "is a Claude Code skill. Try: which claude"
+fi
+
+# Check for optional direct API keys (fallback only)
+if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+  ok "ANTHROPIC_API_KEY detected (will use as fallback)"
+elif [ -n "${OPENAI_API_KEY:-}" ] && [ -n "${NVIDIA_NIM_BASE_URL:-}" ]; then
+  ok "NVIDIA NIM credentials detected (will use as fallback)"
+else
+  if [ "$CLAUDE_CLI_AVAILABLE" = "true" ]; then
+    info "No API keys set — that's fine, using claude CLI for summarization"
+  else
+    warn "No API keys set and claude CLI not found."
+    warn "Set ANTHROPIC_API_KEY=sk-ant-... for context generation."
+  fi
 fi
 
 # ── 6. Register hooks ─────────────────────────────────────────────────────────
