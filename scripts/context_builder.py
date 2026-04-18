@@ -330,8 +330,8 @@ Respond with only the updated description, no explanation."""
                 model="claude-haiku-4-5-20251001",
                 max_tokens=100,
                 temperature=0,
-                system=[{"type": "text", "text": system_prompt}],
-                messages=[{"type": "user", "text": user_prompt}],
+                system=system_prompt,
+                messages=[{"role": "user", "content": user_prompt}],
             )
             updated = response.content[0].text.strip()
 
