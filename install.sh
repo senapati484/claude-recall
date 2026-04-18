@@ -234,6 +234,7 @@ path = Path("$SETTINGS")
 load_cmd = "$LOAD_CMD"
 save_cmd = "$SAVE_CMD"
 start_cmd = "$START_CMD"
+post_tool_cmd = "$POST_TOOL_CMD"
 
 if path.exists():
     try:
@@ -259,7 +260,7 @@ for event, cmd, timeout in [
     ("SessionStart", start_cmd, 10),
     ("UserPromptSubmit", load_cmd, 60),
     ("Stop", save_cmd, 60),
-    ("PostToolUse", POST_TOOL_CMD, 10),
+    ("PostToolUse", post_tool_cmd, 10),
 ]:
     if already(event):
         print(f"  ✓ {event} — already registered")
