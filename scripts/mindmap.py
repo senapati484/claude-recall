@@ -11,10 +11,10 @@ tech stack, and accumulated session knowledge.
 from __future__ import annotations
 
 import json
+import os
 import re
 from datetime import date
 from pathlib import Path
-from typing import Any
 
 
 STOPWORDS = {
@@ -63,14 +63,29 @@ def save_mindmap(project_dir: Path, mindmap: dict) -> None:
         mindmap: Mindmap dict to save
 
     Writes to mindmap.json with indent=2. Updates _meta.updated to today's ISO date.
+    Uses atomic write (temp file + rename) to prevent corruption on crash.
     """
+    import tempfile
+
     mindmap_path = project_dir / "mindmap.json"
     mindmap_path.parent.mkdir(parents=True, exist_ok=True)
 
     mindmap["_meta"]["updated"] = date.today().isoformat()
 
-    with open(mindmap_path, "w", encoding="utf-8") as f:
-        json.dump(mindmap, f, indent=2)
+    try:
+        # Atomic write: write to temp file in same dir, then rename
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(mindmap_path.parent),
+            prefix=".mindmap_tmp_",
+            suffix=".json",
+        )
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(mindmap, f, indent=2)
+        os.replace(tmp_path, mindmap_path)
+    except Exception:
+        # Fallback if atomic write fails
+        with open(mindmap_path, "w", encoding="utf-8") as f:
+            json.dump(mindmap, f, indent=2)
 
 
 def get_relevant_nodes(mindmap: dict, query: str, max_nodes: int = 3) -> list[dict]:

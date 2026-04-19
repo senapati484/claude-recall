@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from utils import (
-    cwd_to_slug, get_project_dir, now_str,
+    cwd_to_slug, now_str,
     DEBUG_LOG, safe_unlink,
 )
 

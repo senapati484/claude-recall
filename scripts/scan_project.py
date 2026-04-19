@@ -16,7 +16,6 @@ Usage:
 import json
 import os
 import sys
-import time
 import shutil
 import subprocess
 from pathlib import Path
@@ -24,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
     load_config, get_project_dir,
-    get_cwd, cwd_to_slug, llm_available,
+    cwd_to_slug, llm_available,
 )
 
 SOURCE_EXTENSIONS = {

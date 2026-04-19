@@ -12,14 +12,20 @@ stdin: JSON from Claude Code (model, workspace, context_window, etc.)
 stdout: Formatted status bar text with ANSI codes
 """
 import json
-import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 CACHE_PATH = Path("/tmp/claude-recall-status.json")
-# The upstream statusLine command is stored here by install.sh
 UPSTREAM_CMD_PATH = Path.home() / ".claude" / "claude-recall-upstream-statusline.txt"
+
+
+def _terminal_width() -> int:
+    try:
+        return shutil.get_terminal_size().columns
+    except Exception:
+        return 120
 
 
 def run_upstream(stdin_data: str) -> str:
@@ -57,26 +63,34 @@ def get_recall_status() -> str:
             return ""
 
         if is_new:
-            return f"\x1b[2m☰ claude-recall: {slug} (new)\x1b[0m"
+            return f"\x1b[2m\u2630 claude-recall: {slug} (new)\x1b[0m"
         else:
-            return f"\x1b[2m☰ claude-recall: {sessions} sessions\x1b[0m"
+            return f"\x1b[2m\u2630 claude-recall: {sessions} sessions\x1b[0m"
     except Exception:
         return ""
 
 
+def _truncate(s: str, max_len: int) -> str:
+    if len(s) <= max_len:
+        return s
+    return s[:max_len - 2] + "…"
+
+
 def main():
-    # Read stdin (Claude Code passes session data as JSON)
     stdin_data = sys.stdin.read()
-
-    # Run upstream statusLine
     upstream = run_upstream(stdin_data)
-
-    # Get recall status
     recall = get_recall_status()
 
-    # Combine: upstream │ recall
     parts = [p for p in [upstream, recall] if p]
-    sys.stdout.write(" │ ".join(parts) if len(parts) > 1 else (parts[0] if parts else ""))
+    if not parts:
+        return
+
+    combined = " \u2502 ".join(parts) if len(parts) > 1 else parts[0]
+
+    max_width = _terminal_width()
+    combined = _truncate(combined, max_width)
+
+    sys.stdout.write(combined)
 
 
 if __name__ == "__main__":

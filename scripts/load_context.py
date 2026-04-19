@@ -12,8 +12,6 @@ Never exits non-zero — a failed hook would block Claude from starting.
 
 from __future__ import annotations
 
-import json
-import re
 import sys
 import traceback
 import os
@@ -41,7 +39,7 @@ from context_builder import (
     build_initial_mindmap, is_context_empty_or_missing,
 )
 
-from mindmap import load_mindmap, get_relevant_nodes, mindmap_to_context_md
+from mindmap import load_mindmap, get_relevant_nodes
 
 
 def _debug(msg: str) -> None:
@@ -179,21 +177,33 @@ def load_context() -> None:
         context_text = "\n\n".join(context_lines)
 
         max_ctx = cfg.get("max_context_tokens", 400)
-        context_text = truncate_to_tokens(context_text, max_ctx)
+
+        # Reserve budget for fixed overhead (header + mcp note)
+        overhead_chars = 80
+        summary_chars = int(max_ctx * 0.2 * 4)  # 20% of token budget in chars
+        context_budget = max_ctx * 4 - overhead_chars - summary_chars
+
+        # truncate_to_tokens() already multiplies by 4 internally
+        context_text = truncate_to_tokens(context_text, context_budget)
 
         last_summary = get_last_session_summary(project_dir)
         if last_summary:
-            last_summary = truncate_to_tokens(last_summary, int(max_ctx * 0.2))
+            last_summary = truncate_to_tokens(last_summary, summary_chars)
 
         _debug(f"Returning {len(context_text)} chars of context")
 
-        print(
-            f"<!-- claude-recall: {len(relevant)} relevant context nodes loaded -->\n"
-            f"Project: `{slug}` | Dir: `{cwd}` | Nodes: {len(mindmap.get('nodes', {}))}\n\n"
-            f"## Relevant Context\n\n{context_text}\n\n"
-            + (f"## Previous session\n\n{last_summary}\n\n" if last_summary else "")
-            + "> **claude-recall active** — use MCP tool `recall_get` for deeper context.\n"
+        # Compact comment replaces verbose headers — saves ~60 chars per prompt
+        node_ids = ", ".join(n["node_id"] for n in relevant)
+        output = (
+            f"<!-- recall: {len(relevant)} nodes ({node_ids}) -->\n"
+            f"Project: `{slug}`\n\n"
+            f"## Context\n\n{context_text}\n\n"
         )
+        if last_summary:
+            output += f"## Prev session\n\n{last_summary}\n\n"
+        output += "> recall active — MCP recall_get for more\n"
+
+        print(output)
 
         start_mcp_if_needed()
 

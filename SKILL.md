@@ -6,7 +6,7 @@ description: >
   prompt (UserPromptSubmit hook) and saves structured session notes to the vault on exit
   (Stop hook). Zero manual invocation — hooks fire automatically.
 
-  Context is AUTO-GENERATED using Claude API (claude-haiku-4-5-20251001). Claude analyzes
+  Context is AUTO-GENERATED using the claude CLI. Claude analyzes
   transcripts and project files to populate mindmap.json with stack, architecture decisions,
   gotchas, and current state. Users never need to manually edit.
 
@@ -21,7 +21,7 @@ description: >
   Install from GitHub (one command):
     curl -fsSL https://raw.githubusercontent.com/senapati484/claude-recall/main/install.sh | bash
 
-  Requires: ANTHROPIC_API_KEY environment variable set.
+  Requires: Python 3.8+, Obsidian, Claude Code CLI in PATH. API keys are optional fallbacks.
 
   Consult this skill for: install help, Obsidian vault path issues, hooks not firing,
   context not loading, sessions not saving, editing context.md, vault folder structure,
@@ -50,7 +50,7 @@ Terminal session closes → Stop hook fires → session note written, context up
 ```
 Session start   →  load_context.py    →  keyword match  →  inject 2-3 relevant nodes
 Tool use       →  post_tool_use.py   →  mark_files_stale() on Edit/Write/Create
-Session end    →  save_context.py    →  Claude API → update mindmap.json nodes
+Session end    →  save_context.py    →  claude CLI → update mindmap.json nodes
 /recall query  →  MCP server recall_get() → return relevant context nodes
 ```
 
@@ -61,16 +61,19 @@ MCP tools are available for Claude to call mid-session for deeper context.
 ### Hook Events
 - **UserPromptSubmit**: Injects relevant context nodes based on current prompt keywords
 - **PostToolUse**: Marks mindmap nodes stale when files are edited (Edit, Write, MultiEdit, Create)
-- **Stop**: Analyzes full transcript via Claude API, updates mindmap.json, writes session note
+- **Stop**: Analyzes full transcript via claude CLI, updates mindmap.json, writes session note
 
 ## LLM Model
 
-claude-recall uses **Claude API (claude-haiku-4-5-20251001)** — the same model you're chatting with.
-No local model or GPU required.
+## LLM Model
 
-- API key: Requires `ANTHROPIC_API_KEY` environment variable
-- Model: `claude-haiku-4-5-20251001` (fast, cheap, haiku-4-5 latest)
-- If API key missing: gracefully falls back to regex-based context extraction
+claude-recall natively uses **claude CLI** — meaning it inherits your Claude Code auth.
+API keys are only used as fallback.
+
+- Backend 1 (Primary): `claude` CLI backend
+- Backend 2: `ANTHROPIC_API_KEY` (haiku-4-5)
+- Backend 3: NVIDIA NIM
+- If missing all: gracefully falls back to regex-based context extraction
 - LLM is used for:
   - Session summarization (what was done, decisions, next steps, files_and_roles)
   - Project context generation (via /recall update)
@@ -141,7 +144,7 @@ The installer:
 2. Asks for your Obsidian vault path (once — saved to `~/.claude/claude-recall.json`)
 3. Clones the repo to `~/.claude/skills/claude-recall/`
 4. Installs `anthropic` and `fastmcp` via pip
-5. Checks for `ANTHROPIC_API_KEY` in environment
+5. Checks for `claude` CLI and optional API keys
 6. Registers `UserPromptSubmit`, `Stop`, and `PostToolUse` hooks + MCP server in `~/.claude/settings.json`
 7. Creates `<vault>/claude-recall/` folder structure
 
@@ -187,15 +190,15 @@ outside the auto-markers. Claude reads it before your first message every sessio
   - Starts MCP server process for recall tools
 - `scripts/save_context.py` — `Stop` hook. Fires on exit.
   - Parses full transcript (all messages, tool calls, errors, file ops)
-  - Calls Claude API to generate structured summary (summary, decisions, files_and_roles, keywords)
+  - Generates structured summary (summary, decisions, files_and_roles, keywords) via LLM
   - Updates mindmap.json nodes with session learnings
   - Writes context.md (Obsidian-readable) from mindmap
   - Writes session note to sessions/YYYY-MM-DD_HH-MM.md
   - Updates _index.md
-- `scripts/summarize.py` — Claude API summarizer.
-  - Uses anthropic SDK with model claude-haiku-4-5-20251001
+- `scripts/summarize.py` — LLM summarizer.
+  - Automatically routes to claude CLI or Anthropic/NIM APIs
   - Returns structured JSON: summary, decisions, files_and_roles, next_steps, keywords
-  - Falls back to regex if API unavailable
+  - Falls back to regex if LLMs unavailable
 - `scripts/mindmap.py` — Mindmap storage + retrieval.
   - load_mindmap(), save_mindmap(), get_relevant_nodes()
   - upsert_node(), mark_files_stale(), build_initial_mindmap_from_stack()
@@ -211,7 +214,7 @@ outside the auto-markers. Claude reads it before your first message every sessio
   - `query`: Search mindmap for relevant nodes
   - `reset`: Delete and regenerate mindmap.json
 - `scripts/utils.py` — shared helpers:
-  - `llm_available()` — checks ANTHROPIC_API_KEY
+  - `llm_available()` — checks for claude CLI or API keys
   - `get_anthropic_client()` — cached Anthropic client
   - `merge_auto_section()` — preserves user content outside auto-markers
   - `detect_project_stack()` — scans package.json, requirements.txt, etc.
@@ -252,7 +255,7 @@ outside the auto-markers. Claude reads it before your first message every sessio
 | Sessions not saving | Verify vault is writable; check `save_sessions: true` in config |
 | Wrong project loaded | Launch `claude` from the correct project directory |
 | Mindmap is empty | Run `/recall update` to populate from filesystem |
-| "ANTHROPIC_API_KEY not set" | Set it in your shell profile: `export ANTHROPIC_API_KEY=sk-ant-...` |
+| "claude CLI: not found" | Install Claude Code and ensure it's in your PATH |
 | Hook errors | Run `echo '{"cwd":"'$(pwd)'","session_id":"t"}' \| python3 ~/.claude/skills/claude-recall/scripts/load_context.py` |
 | Re-install / update | Re-run the `curl` install command — detects existing install |
 

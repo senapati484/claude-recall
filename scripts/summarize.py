@@ -18,7 +18,6 @@ import re
 import shutil
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 
@@ -84,7 +83,7 @@ def _debug(msg: str) -> None:
     """Write debug message to log file."""
     from datetime import datetime
     try:
-        log_path = Path.home() / ".claude-recall" / "debug.log"
+        log_path = Path.home() / ".claude" / "claude-recall-debug.log"
         log_path.parent.mkdir(parents=True, exist_ok=True)
         with open(log_path, "a") as f:
             f.write(f"[{datetime.now().isoformat()}] SUMMARIZE: {msg}\n")

@@ -20,8 +20,8 @@ import json
 import os
 import re
 import sys
-import traceback
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 
 CONFIG_PATH = Path.home() / ".claude" / "claude-recall.json"
@@ -214,7 +214,10 @@ def truncate_to_tokens(text: str, max_tokens: int) -> str:
 # ── Claude API ───────────────────────────────────────────────────────────────
 
 def llm_available() -> bool:
-    """Check if Claude API is available (Anthropic or NVIDIA NIM)."""
+    """Check if Claude AI is available (claude CLI, Anthropic, or NVIDIA NIM)."""
+    import shutil
+    if shutil.which("claude"):
+        return True
     # Check Anthropic first
     if os.environ.get("ANTHROPIC_API_KEY"):
         try:
@@ -288,7 +291,7 @@ def filter_file_paths(files: list[str], cwd: Path | None = None) -> list[str]:
 
 # ── Filesystem detection ─────────────────────────────────────────────────────
 
-def detect_project_stack(cwd: Path) -> dict:
+def _detect_project_stack_impl(cwd: Path) -> dict:
     """Detect project stack from filesystem. Returns structured info."""
     info = {
         "type": "unknown",
@@ -489,6 +492,17 @@ def detect_project_stack(cwd: Path) -> dict:
     info["stack"] = list(dict.fromkeys(info["stack"]))
 
     return info
+
+
+@lru_cache(maxsize=32)
+def _detect_project_stack_cached(cwd_str: str) -> dict:
+    """Cached inner function — cwd passed as string for hashability."""
+    return _detect_project_stack_impl(Path(cwd_str))
+
+
+def detect_project_stack(cwd: Path) -> dict:
+    """Detect project stack from filesystem. Returns cached result within same session."""
+    return _detect_project_stack_cached(str(cwd))
 
 
 # ── Auto-marker section management ───────────────────────────────────────────

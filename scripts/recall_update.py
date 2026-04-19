@@ -17,7 +17,6 @@ import sys
 import os
 import shutil
 import subprocess
-import json
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
@@ -28,7 +27,6 @@ from utils import (
 from context_builder import build_initial_mindmap
 from mindmap import (
     load_mindmap,
-    save_mindmap,
     get_relevant_nodes,
     mindmap_to_context_md,
 )
@@ -193,8 +191,7 @@ def action_doctor(cwd: Path, cfg: dict) -> None:
     if claude_path:
         try:
             r = subprocess.run(
-                ["claude", "-p", "--bare", "--dangerously-skip-permissions",
-                 "--output-format", "text", "Say: RECALL_TEST_OK"],
+                ["claude", "--version"],
                 capture_output=True, text=True, timeout=20,
             )
             if r.returncode == 0 and r.stdout.strip():

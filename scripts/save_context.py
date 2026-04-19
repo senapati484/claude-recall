@@ -23,6 +23,7 @@ import os
 import re
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
@@ -38,15 +39,15 @@ except Exception:
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-_HAS_LLM = False  # Disabled for performance - LLM calls block for 30s+
+_HAS_LLM = True
 
 from utils import (
     load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
-    cwd_to_slug, now_str, filter_file_paths, detect_project_stack,
+    cwd_to_slug, now_str, filter_file_paths,
     parse_index_entries, build_index_table, DEBUG_LOG,
 )
 from session_manager import (
-    build_session_note, clear_session_marker, cleanup_stale_markers,
+    build_session_note, cleanup_stale_markers,
 )
 from context_builder import (
     build_initial_mindmap,
@@ -54,26 +55,6 @@ from context_builder import (
     update_mindmap_after_session,
 )
 from mindmap import load_mindmap, mindmap_to_context_md
-from session_manager import (
-    build_session_note,
-    cleanup_stale_markers,
-    clear_session_marker,
-)
-from utils import (
-    DEBUG_LOG,
-    build_index_table,
-    cwd_to_slug,
-    detect_project_stack,
-    filter_file_paths,
-    get_cwd,
-    get_project_dir,
-    get_vault_root,
-    load_config,
-    now_str,
-    parse_index_entries,
-    read_hook_input,
-    safe_unlink,
-)
 
 
 def _debug(msg: str) -> None:
@@ -317,36 +298,34 @@ def get_git_changes(cwd: Path) -> dict:
     Returns empty on failure (not a git repo, no changes, etc.)
     """
     result = {"changed_files": [], "recent_commits": [], "branch": ""}
+    cwd_str = str(cwd)
+
+    def run_git(args: list[str]) -> tuple[str, str, int]:
+        try:
+            r = subprocess.run(
+                ["git"] + args,
+                cwd=cwd_str,
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            return (args[0], r.stdout.strip(), r.returncode)
+        except Exception:
+            return (args[0], "", 1)
+
     try:
-        branch = subprocess.run(
-            ["git", "branch", "--show-current"],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if branch.returncode == 0:
-            result["branch"] = branch.stdout.strip()
-
-        diff = subprocess.run(
-            ["git", "diff", "--name-only", "HEAD"],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if diff.returncode == 0:
-            result["changed_files"] = [f for f in diff.stdout.strip().splitlines() if f]
-
-        log = subprocess.run(
-            ["git", "log", "--oneline", "-3"],
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-        if log.returncode == 0:
-            result["recent_commits"] = [c for c in log.stdout.strip().splitlines() if c]
+        with ThreadPoolExecutor(max_workers=3) as ex:
+            branch_r, diff_r, log_r = ex.map(
+                run_git,
+                [
+                    ["branch", "--show-current"],
+                    ["diff", "--name-only", "HEAD"],
+                    ["log", "--oneline", "-3"],
+                ],
+            )
+        result["branch"] = branch_r[1] if branch_r[2] == 0 else ""
+        result["changed_files"] = [f for f in diff_r[1].splitlines() if f] if diff_r[2] == 0 else []
+        result["recent_commits"] = [c for c in log_r[1].splitlines() if c] if log_r[2] == 0 else []
     except Exception:
         pass
     return result
@@ -419,6 +398,23 @@ def update_index(vault_root: Path, slug: str, cwd: Path, turns: int) -> None:
 
     index_path.write_text(build_index_table(entries), encoding="utf-8")
     _debug(f"Index updated: {slug} ({'existing' if found else 'new'})")
+
+
+def _llm_summary(messages: list[dict], facts: dict) -> dict | None:
+    """Generate LLM session summary using summarize.py with timeout."""
+    import concurrent.futures
+    try:
+        from summarize import generate_summary
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(generate_summary, messages, facts)
+            # 25 seconds timeout to not block Claude indefinitely
+            return future.result(timeout=25)
+    except concurrent.futures.TimeoutError:
+        _debug("_llm_summary timed out after 25s")
+        return None
+    except Exception as e:
+        _debug(f"_llm_summary import/call error: {e}")
+        return None
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -521,8 +517,6 @@ def save_session() -> None:
     (project_dir / "context.md").write_text(context_md_content, encoding="utf-8")
 
     _debug(f"Mindmap updated: {len(mindmap.get('nodes', {}))} nodes")
-
-    git_changes = get_git_changes(cwd)
 
     # Write session note — OVERWRITE same file for same session_id
     # This is critical because Stop fires after EVERY turn, not just at exit.

@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
     detect_project_stack, DEBUG_LOG,
-    merge_auto_section, llm_available, is_nvidia_nim,
+    is_nvidia_nim,
 )
 
 from mindmap import (
@@ -31,7 +31,6 @@ from mindmap import (
     load_mindmap,
     upsert_node,
     mark_files_stale,
-    get_relevant_nodes,
 )
 
 
@@ -197,19 +196,21 @@ Project files:
 {file_context}
 
 Write only the description. No headers, no lists, no markdown. Just plain sentences."""
-    
     try:
+        import subprocess
         result = subprocess.run(
             ["claude", "-p", "--bare", "--dangerously-skip-permissions",
              "--output-format", "text", prompt],
-            capture_output=True, text=True, timeout=25, cwd=str(cwd),
+            capture_output=True, text=True, timeout=15, cwd=str(cwd),
         )
         if result.returncode == 0 and result.stdout.strip():
             desc = result.stdout.strip()
             if len(desc) > 20:
                 return desc
-    except Exception:
-        pass
+    except subprocess.TimeoutExpired:
+        _debug("claude CLI timeout during overview generation (15s)")
+    except Exception as e:
+        _debug(f"claude CLI error during overview generation: {e}")
     
     return readme_desc
 

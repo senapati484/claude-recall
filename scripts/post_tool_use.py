@@ -6,13 +6,12 @@ Fires after each tool use to detect file edits and mark mindmap nodes stale.
 This keeps context fresh by invalidating nodes when their files are modified.
 """
 
-import os
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from utils import load_config, get_project_dir, read_hook_input, cwd_to_slug
+from utils import load_config, get_project_dir, read_hook_input
 from mindmap import load_mindmap, mark_files_stale, save_mindmap
 
 SKIP_TOOLS = {"Edit", "Write", "MultiEdit", "Create"}
