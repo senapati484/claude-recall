@@ -274,11 +274,11 @@ rm ~/.claude/claude-recall.json
 │  Tool use    ├──────►│ post_tool_use.py │       ┌────────────────┐
 │  (edit)      │       │ + mark_stale()   │       │  MCP Server    │
 └──────────────┘       └────────┬─────────┘       │ recall_get()   │
-                                 │                 │ recall_update()│
-                    ┌────────────┴────────────┐    │ recall_session_│
-                    │   claude CLI (primary)  │    │ recall_mindmap │
-                    │   or API key (fallback) │    └────────────────┘
-                    └─────────────────────────┘
+                                │                 │ recall_update()│
+                   ┌────────────┴────────────┐    │ recall_session_│
+                   │   claude CLI (primary)  │    │ recall_mindmap │
+                   │   or API key (fallback) │    └────────────────┘
+                   └─────────────────────────┘
 ~/.claude/claude-recall.json
 ~/.claude/claude-recall-slug.env
 ```
