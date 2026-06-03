@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
     load_config, get_vault_root, get_project_dir,
-    cwd_to_slug, detect_project_stack, llm_available, safe_unlink,
+    resolve_project_slug, detect_project_stack, llm_available, safe_unlink,
 )
 from context_builder import build_initial_mindmap
 from mindmap import (
@@ -34,7 +34,7 @@ from mindmap import (
 
 def action_update(cwd: Path, cfg: dict) -> None:
     """Scan project and regenerate mindmap.json."""
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     project_dir.mkdir(parents=True, exist_ok=True)
 
@@ -57,7 +57,7 @@ def action_update(cwd: Path, cfg: dict) -> None:
 
 def action_status(cwd: Path, cfg: dict) -> None:
     """Print current mindmap as a tree."""
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     mindmap_path = project_dir / "mindmap.json"
 
@@ -104,7 +104,7 @@ def action_status(cwd: Path, cfg: dict) -> None:
 
 def action_query(query: str, cwd: Path, cfg: dict) -> None:
     """Search mindmap for relevant context."""
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     mindmap_path = project_dir / "mindmap.json"
 
@@ -139,7 +139,7 @@ def action_query(query: str, cwd: Path, cfg: dict) -> None:
 
 def action_reset(cwd: Path, cfg: dict) -> None:
     """Delete existing mindmap.json and regenerate from scratch."""
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     mindmap_path = project_dir / "mindmap.json"
 
@@ -270,7 +270,7 @@ def action_doctor(cwd: Path, cfg: dict) -> None:
 
     # 7. Mindmap for current project
     print()
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     mindmap_path = project_dir / "mindmap.json"
 

@@ -22,14 +22,14 @@ except Exception:
 try:
     sys.path.insert(0, str(Path(__file__).parent))
     from utils import (
-        load_config, get_cwd, cwd_to_slug, read_hook_input,
+        load_config, get_cwd, resolve_project_slug, read_hook_input,
         get_project_dir, write_status_cache,
     )
 
     hook_input = read_hook_input()
     cwd = get_cwd(hook_input)
-    slug = cwd_to_slug(cwd)
     cfg = load_config()
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     context_md = project_dir / "context.md"
     sessions_dir = project_dir / "sessions"

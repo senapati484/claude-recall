@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -131,19 +132,51 @@ def cwd_to_slug(cwd: Path) -> str:
     /home/sayan/projects/setu          → setu
     /home/sayan/client/acme/dashboard  → acme-dashboard
     """
+    raw_path = re.sub(r"/+", "/", str(cwd).replace("\\", "/"))
+    raw_path = re.sub(r"^[A-Za-z]:", "", raw_path)
+    raw_path = re.sub(r"^/mnt/[A-Za-z](?=/|$)", "", raw_path)
+
+    parts = [part for part in raw_path.split("/") if part and part != "."]
+    if len(parts) >= 2 and parts[0].lower() in {"home", "users"}:
+        parts = parts[2:]
+
+    def slugify_part(part: str) -> str:
+        normalized = unicodedata.normalize("NFKD", part)
+        without_marks = "".join(
+            ch for ch in normalized if unicodedata.category(ch) != "Mn"
+        )
+        lowered = without_marks.lower()
+        cleaned = re.sub(r"[^\w\s.-]", "", lowered)
+        return re.sub(r"[-\s.]+", "-", cleaned).strip("-_")
+
+    # Drop generic noise segments
+    noise = {"projects", "repos", "code", "src", "workspace", "dev", "work", "home"}
+    meaningful = []
+    for part in parts:
+        if part.lower() in noise:
+            continue
+        slug = slugify_part(part)
+        if slug:
+            meaningful.append(slug)
+    if len(meaningful) >= 2:
+        return "-".join(meaningful[-2:])
+    if meaningful:
+        return meaningful[-1]
+    return "unknown-project"
+
+
+def legacy_cwd_to_slug(cwd: Path) -> str:
+    """Return the prior slugging behavior for compatibility checks."""
     parts = list(cwd.parts)
 
-    # Strip WSL Windows prefix /mnt/X/
     if len(parts) >= 3 and parts[1] == "mnt" and len(parts[2]) == 1:
         parts = parts[3:]
 
-    # Strip home dir prefix
     home_parts = list(Path.home().parts)
     while parts and home_parts and parts[0] == home_parts[0]:
         parts.pop(0)
         home_parts.pop(0)
 
-    # Drop generic noise segments
     noise = {"projects", "repos", "code", "src", "workspace", "dev", "work", "home"}
     meaningful = [p for p in parts if p.lower() not in noise]
     if meaningful:
@@ -154,8 +187,21 @@ def cwd_to_slug(cwd: Path) -> str:
         chosen = parts
 
     slug = "-".join(chosen).lower()
-    slug = re.sub(r"[^a-z0-9\-]", "-", slug).strip("-")
+    slug = re.sub(r"[^a-z0-9\\-]", "-", slug).strip("-")
     return slug or "unknown-project"
+
+
+def resolve_project_slug(cfg: dict, cwd: Path) -> str:
+    """Prefer the new slug unless an existing legacy project directory exists."""
+    slug = cwd_to_slug(cwd)
+    projects_dir = get_vault_root(cfg) / "projects"
+    if (projects_dir / slug).exists():
+        return slug
+
+    legacy_slug = legacy_cwd_to_slug(cwd)
+    if legacy_slug != slug and (projects_dir / legacy_slug).exists():
+        return legacy_slug
+    return slug
 
 
 def get_project_dir(cfg: dict, slug: str) -> Path:

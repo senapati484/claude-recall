@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils import (
     load_config, get_project_dir, read_hook_input, get_cwd,
-    cwd_to_slug, truncate_to_tokens, DEBUG_LOG, safe_unlink,
+    resolve_project_slug, truncate_to_tokens, DEBUG_LOG, safe_unlink,
 )
 from session_manager import (
     should_load_context, mark_session_loaded, cleanup_stale_markers,
@@ -124,7 +124,7 @@ def load_context() -> None:
             _debug("Skipping - no prompt text and not first prompt")
             return
 
-        slug = cwd_to_slug(cwd)
+        slug = resolve_project_slug(cfg, cwd)
 
         # Write slug to env file for MCP server
         slug_env_path = Path.home() / ".claude" / "claude-recall-slug.env"
