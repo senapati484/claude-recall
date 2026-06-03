@@ -246,6 +246,49 @@ Edit `~/.claude/claude-recall.json` to override defaults:
 | `load_on_every_prompt` | `true` | Reload relevant context on every prompt |
 | `use_claude_api` | `true` | Use Claude API for summarization |
 
+### 🤖 LLM Fallback Providers
+
+`claude-recall` supports multiple AI backends for session summarization and context generation. It checks them in a specific fallback order and defaults to a zero-config local regex fallback if no backend is configured or available.
+
+#### Fallback Priority Order
+
+1. **Claude CLI** (Primary)
+   - **When used**: Whenever the `claude` executable is found in your system's PATH.
+   - **How it works**: Uses Claude Code's own active authentication context under the hood via `claude -p`.
+   - **Dependencies**: No extra configuration or API keys are required.
+
+2. **Anthropic API** (Fallback 1)
+   - **When used**: If the `claude` CLI is not found or fails to run, and the `ANTHROPIC_API_KEY` environment variable is defined.
+   - **How it works**: Directly calls Anthropic's API using the `claude-haiku-4-5-20251001` (or `haiku-4-5`) model.
+   - **Dependencies**: Requires the `anthropic` Python package (`pip install anthropic`).
+
+3. **NVIDIA NIM / OpenAI-Compatible API** (Fallback 2)
+   - **When used**: If both the `claude` CLI and `ANTHROPIC_API_KEY` are unavailable, and the `OPENAI_API_KEY` and `NVIDIA_NIM_BASE_URL` environment variables are defined.
+   - **How it works**: Calls an OpenAI-compatible endpoint with the `claude-3-5-haiku-20241022` model name (mapped appropriately by the target provider).
+   - **Dependencies**: Requires the `openai` Python package (`pip install openai`).
+
+4. **Regex-based Fallback** (Fallback 3)
+   - **When used**: If all of the above options are unavailable or fail.
+   - **How it works**: Parses the transcript using fast heuristic regex pattern matching to extract touched files, session metrics, and basic summaries.
+
+#### Example Environment Configuration
+
+An example configuration file is provided in the project root as `.env.example`. You can copy this file to `.env` in your project folder or export these variables directly in your terminal profile:
+
+```bash
+# Copy example env file
+cp .env.example .env
+```
+
+##### Example NVIDIA NIM Setup
+To use NVIDIA NIM (or another OpenAI-compatible inference endpoint) as your fallback provider, configure your `.env` as follows:
+
+```env
+# Use build.nvidia.com or your local/private NIM endpoint
+NVIDIA_NIM_BASE_URL="https://integrate.api.nvidia.com/v1"
+OPENAI_API_KEY="nvapi-your-nvidia-api-key-here"
+```
+
 ---
 
 ## 🔄 Update
