@@ -23,7 +23,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 from utils import (
     load_config, get_project_dir,
-    cwd_to_slug, llm_available,
+    resolve_project_slug, llm_available,
 )
 
 SOURCE_EXTENSIONS = {
@@ -113,7 +113,7 @@ def scan_project() -> None:
 
     cwd = Path(os.getcwd())
     cfg = load_config()
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     project_dir = get_project_dir(cfg, slug)
     project_dir.mkdir(parents=True, exist_ok=True)
 

@@ -43,7 +43,7 @@ _HAS_LLM = True
 
 from utils import (
     load_config, get_vault_root, get_project_dir, read_hook_input, get_cwd,
-    cwd_to_slug, now_str, filter_file_paths,
+    resolve_project_slug, now_str, filter_file_paths,
     parse_index_entries, build_index_table, DEBUG_LOG,
 )
 from session_manager import (
@@ -450,7 +450,7 @@ def save_session() -> None:
         _debug("No messages - returning early")
         return
 
-    slug = cwd_to_slug(cwd)
+    slug = resolve_project_slug(cfg, cwd)
     vault_root = get_vault_root(cfg)
     project_dir = get_project_dir(cfg, slug)
 

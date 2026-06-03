@@ -1,10 +1,11 @@
 import sys
 import unittest
 from pathlib import Path, PureWindowsPath
+from tempfile import TemporaryDirectory
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
-from utils import cwd_to_slug
+from utils import cwd_to_slug, resolve_project_slug
 
 
 class CwdToSlugTests(unittest.TestCase):
@@ -46,6 +47,17 @@ class CwdToSlugTests(unittest.TestCase):
             cwd_to_slug(Path("/home/user/projects/東京/分析ツール")),
             "東京-分析ツール",
         )
+
+    def test_existing_legacy_project_dir_keeps_legacy_slug(self):
+        with TemporaryDirectory() as tmp:
+            vault = Path(tmp)
+            legacy_dir = vault / "claude-recall" / "projects" / "user-setu"
+            legacy_dir.mkdir(parents=True)
+            cfg = {"vault_path": str(vault), "vault_folder": "claude-recall"}
+            self.assertEqual(
+                resolve_project_slug(cfg, Path("/home/user/projects/setu")),
+                "user-setu",
+            )
 
     def test_noise_only_paths_fall_back_to_unknown_project(self):
         self.assertEqual(
