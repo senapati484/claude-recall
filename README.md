@@ -14,9 +14,25 @@
 </p>
 
 <p align="center">
-  <a href="#-install"><img src="https://img.shields.io/badge/install-one_command-D97757?style=for-the-badge&logo=gnubash&logoColor=white" alt="Install"></a>&nbsp;
-  <a href="#-how-it-works"><img src="https://img.shields.io/badge/hooks-automatic-7C3AED?style=for-the-badge&logo=obsidian&logoColor=white" alt="Automatic"></a>&nbsp;
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge" alt="License"></a>
+  <a href="https://github.com/senapati484/claude-recall#-install">
+    <img src="https://img.shields.io/badge/install-one_command-D97757?style=for-the-badge&logo=gnubash&logoColor=white" alt="Install">
+  </a>&nbsp;
+
+  <a href="https://github.com/senapati484/claude-recall#-how-it-works">
+    <img src="https://img.shields.io/badge/hooks-automatic-7C3AED?style=for-the-badge&logo=obsidian&logoColor=white" alt="Automatic">
+  </a>&nbsp;
+
+  <a href="https://github.com/senapati484/claude-recall/issues">
+    <img src="https://img.shields.io/github/issues/senapati484/claude-recall?style=for-the-badge&color=2563eb" alt="Open Issues">
+  </a>&nbsp;
+
+  <a href="https://github.com/senapati484/claude-recall/pulls">
+    <img src="https://img.shields.io/github/issues-pr/senapati484/claude-recall?style=for-the-badge&color=f59e0b" alt="Pull Requests">
+  </a>&nbsp;
+
+  <a href="LICENSE">
+    <img src="https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge" alt="License">
+  </a>
 </p>
 
 <br>
