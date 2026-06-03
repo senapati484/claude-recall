@@ -142,8 +142,12 @@ def cwd_to_slug(cwd: Path) -> str:
 
     def slugify_part(part: str) -> str:
         normalized = unicodedata.normalize("NFKD", part)
-        ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
-        return re.sub(r"[^a-z0-9]+", "-", ascii_only.lower()).strip("-")
+        without_marks = "".join(
+            ch for ch in normalized if unicodedata.category(ch) != "Mn"
+        )
+        lowered = without_marks.lower()
+        cleaned = re.sub(r"[^\w\s.-]", "", lowered)
+        return re.sub(r"[-\s.]+", "-", cleaned).strip("-_")
 
     # Drop generic noise segments
     noise = {"projects", "repos", "code", "src", "workspace", "dev", "work", "home"}

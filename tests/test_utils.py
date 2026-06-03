@@ -17,6 +17,12 @@ class CwdToSlugTests(unittest.TestCase):
             "acme-dashboard",
         )
 
+    def test_existing_ascii_slug_shape_stays_stable(self):
+        self.assertEqual(
+            cwd_to_slug(Path("/Users/sayan/projects/client/acme-dashboard")),
+            "client-acme-dashboard",
+        )
+
     def test_wsl_path_strips_mount_and_user_prefix(self):
         self.assertEqual(
             cwd_to_slug(Path("/mnt/c/Users/Sayan/repos/my-app")),
@@ -33,6 +39,12 @@ class CwdToSlugTests(unittest.TestCase):
         self.assertEqual(
             cwd_to_slug(Path("/home/user/projects/Cafe/uber tool.v2")),
             "cafe-uber-tool-v2",
+        )
+
+    def test_non_latin_segments_are_preserved(self):
+        self.assertEqual(
+            cwd_to_slug(Path("/home/user/projects/東京/分析ツール")),
+            "東京-分析ツール",
         )
 
     def test_noise_only_paths_fall_back_to_unknown_project(self):
