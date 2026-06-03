@@ -20,6 +20,7 @@ import json
 import os
 import re
 import sys
+import unicodedata
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
@@ -131,31 +132,33 @@ def cwd_to_slug(cwd: Path) -> str:
     /home/sayan/projects/setu          → setu
     /home/sayan/client/acme/dashboard  → acme-dashboard
     """
-    parts = list(cwd.parts)
+    raw_path = re.sub(r"/+", "/", str(cwd).replace("\\", "/"))
+    raw_path = re.sub(r"^[A-Za-z]:", "", raw_path)
+    raw_path = re.sub(r"^/mnt/[A-Za-z](?=/|$)", "", raw_path)
 
-    # Strip WSL Windows prefix /mnt/X/
-    if len(parts) >= 3 and parts[1] == "mnt" and len(parts[2]) == 1:
-        parts = parts[3:]
+    parts = [part for part in raw_path.split("/") if part and part != "."]
+    if len(parts) >= 2 and parts[0].lower() in {"home", "users"}:
+        parts = parts[2:]
 
-    # Strip home dir prefix
-    home_parts = list(Path.home().parts)
-    while parts and home_parts and parts[0] == home_parts[0]:
-        parts.pop(0)
-        home_parts.pop(0)
+    def slugify_part(part: str) -> str:
+        normalized = unicodedata.normalize("NFKD", part)
+        ascii_only = normalized.encode("ascii", "ignore").decode("ascii")
+        return re.sub(r"[^a-z0-9]+", "-", ascii_only.lower()).strip("-")
 
     # Drop generic noise segments
     noise = {"projects", "repos", "code", "src", "workspace", "dev", "work", "home"}
-    meaningful = [p for p in parts if p.lower() not in noise]
+    meaningful = []
+    for part in parts:
+        if part.lower() in noise:
+            continue
+        slug = slugify_part(part)
+        if slug:
+            meaningful.append(slug)
+    if len(meaningful) >= 2:
+        return "-".join(meaningful[-2:])
     if meaningful:
-        chosen = meaningful[-2:]
-    elif len(parts) >= 2:
-        chosen = parts[-2:]
-    else:
-        chosen = parts
-
-    slug = "-".join(chosen).lower()
-    slug = re.sub(r"[^a-z0-9\-]", "-", slug).strip("-")
-    return slug or "unknown-project"
+        return meaningful[-1]
+    return "unknown-project"
 
 
 def get_project_dir(cfg: dict, slug: str) -> Path:
